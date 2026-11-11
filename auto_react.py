@@ -34,7 +34,11 @@ STAGGER_MAX_SEC = 5.0           # maximum delay (randomised per account)
 MAX_REACTIONS_PER_HOUR     = 30    # hard ceiling per account per rolling hour
 MIN_GAP_BETWEEN_REACTIONS  = 2.0   # minimum seconds between reactions (same account)
 
-ACCOUNTS_CSV = "Telegram_70_000_000_[YOSCRYPT].csv"   # columns: phone, session_name
+# ─── CSV FOLDER ───────────────────────────────────────────────────────────────
+# Drop any number of CSV files into this folder.
+# auto_react.py will read ALL of them at startup — no need to specify filenames.
+# Expected CSV columns: phone, session_name[, proxy_type, proxy_host, proxy_port, proxy_user, proxy_pass]
+ACCOUNTS_CSV_DIR = "accounts"   # folder path, relative to this script or absolute
 # ──────────────────────────────────────────────────────────────────────────────
 
 mgr = await build_account_manager(flood_guard=flood_guard)
@@ -160,7 +164,8 @@ class Account:
         self._consecutive_failures += 1
 
 
-def load_accounts(path: str) -> list[Account]:
+def _load_accounts_from_file(path: str) -> list[Account]:
+    """Read one CSV file and return a list of Account objects."""
     accounts = []
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -181,6 +186,71 @@ def load_accounts(path: str) -> list[Account]:
                 ),
             ))
     return accounts
+
+
+def load_accounts(folder: str = ACCOUNTS_CSV_DIR) -> list[Account]:
+    """
+    Read every *.csv file inside *folder* and merge into one account list.
+    Duplicate phone numbers (same phone in multiple files) are de-duplicated —
+    the first occurrence wins.
+
+    Args:
+        folder: Path to the directory that contains account CSV files.
+                Create the folder yourself and drop any number of .csv files in.
+                Sub-directories are ignored; only top-level *.csv files are read.
+
+    Returns:
+        Flat list of Account objects ready for connect_all().
+    """
+    import os, glob
+
+    folder_path = os.path.abspath(folder)
+    if not os.path.isdir(folder_path):
+        raise FileNotFoundError(
+            f"[load_accounts] CSV folder not found: {folder_path!r}\n"
+            f"Create the folder and place your .csv account files inside it."
+        )
+
+    csv_files = sorted(glob.glob(os.path.join(folder_path, "*.csv")))
+    if not csv_files:
+        raise FileNotFoundError(
+            f"[load_accounts] No .csv files found in: {folder_path!r}\n"
+            f"Drop at least one account CSV file into that folder."
+        )
+
+    all_accounts: list[Account] = []
+    seen_phones: set[str] = set()
+    total_dupes = 0
+
+    for csv_path in csv_files:
+        try:
+            batch = _load_accounts_from_file(csv_path)
+        except Exception as e:
+            logging.warning("[load_accounts] Skipping %s — %s", csv_path, e)
+            continue
+
+        for acc in batch:
+            if acc.phone in seen_phones:
+                total_dupes += 1
+                continue
+            seen_phones.add(acc.phone)
+            all_accounts.append(acc)
+
+        logging.info(
+            "[load_accounts] %s → %d accounts (cumulative: %d)",
+            os.path.basename(csv_path), len(batch), len(all_accounts),
+        )
+
+    if total_dupes:
+        logging.warning(
+            "[load_accounts] %d duplicate phone(s) removed across files", total_dupes
+        )
+
+    logging.info(
+        "[load_accounts] Done. %d total accounts loaded from %d file(s) in %r",
+        len(all_accounts), len(csv_files), folder_path,
+    )
+    return all_accounts
 
 
 async def connect_account(acc: Account) -> bool:
@@ -354,7 +424,7 @@ async def react_all(
 HEALTH_CHECK_INTERVAL = 120.0   # seconds between each health-check sweep
 
 async def main() -> None:
-    accounts = load_accounts(ACCOUNTS_CSV)
+    accounts = load_accounts(ACCOUNTS_CSV_DIR)
     await connect_all(accounts)
     
     registry = ChatConfigRegistry.load("chat_configs.json")
