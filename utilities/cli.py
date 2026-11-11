@@ -6,9 +6,9 @@
 #
 # Usage examples
 # --------------
-# Run the reaction bot:
+# Run the reaction bot (reads all *.csv files in the accounts/ folder):
 #   python -m utilities.cli react \
-#       --csv accounts.csv \
+#       --csv-dir accounts \
 #       --mode staggered \
 #       --stagger-min 2.0 \
 #       --stagger-max 8.0 \
@@ -17,17 +17,17 @@
 #
 # Run the join bot:
 #   python -m utilities.cli join \
-#       --csv accounts.csv \
+#       --csv-dir accounts \
 #       --targets groups.txt \
 #       --batch-size 5 \
 #       --delay 60
 #
 # Run fingerprint operations:
-#   python -m utilities.cli fingerprint report --csv accounts.csv
-#   python -m utilities.cli fingerprint rotate --csv accounts.csv --phone +66891234567
+#   python -m utilities.cli fingerprint report --csv-dir accounts
+#   python -m utilities.cli fingerprint rotate --csv-dir accounts --phone +66891234567
 #
 # Show stats for the current session:
-#   python -m utilities.cli status --csv accounts.csv
+#   python -m utilities.cli status --csv-dir accounts
 
 from __future__ import annotations
 
@@ -79,9 +79,9 @@ class ReactConfig:
     api_id: Optional[int] = None
     api_hash: Optional[str] = None
 
-    # CSV / session
-    accounts_csv: str = "Telegram_70_000_000_[YOSCRYPT].csv"
-    sender_csv: Optional[str] = None      # separate sender CSV; None = first row of accounts_csv
+    # CSV folder — all *.csv files inside are loaded automatically
+    accounts_csv_dir: str = "accounts"
+    sender_csv: Optional[str] = None      # separate sender CSV; None = first row of accounts_csv_dir
 
     # Reaction parameters
     reaction_pool: List[str] = None   # type: ignore[assignment]
@@ -116,8 +116,8 @@ class JoinConfig:
     api_id: Optional[int] = None
     api_hash: Optional[str] = None
 
-    # CSV / session
-    accounts_csv: str = "Telegram_70_000_000_[YOSCRYPT].csv"
+    # CSV folder — all *.csv files inside are loaded automatically
+    accounts_csv_dir: str = "accounts"
 
     # Targets
     targets: List[str] = None   # type: ignore[assignment]
@@ -150,7 +150,7 @@ class JoinConfig:
 class FingerprintConfig:
     """Config for fingerprint subcommands."""
 
-    accounts_csv: str = "Telegram_70_000_000_[YOSCRYPT].csv"
+    accounts_csv_dir: str = "accounts"
     store_path: str = "fingerprints.json"
     phone: Optional[str] = None
     strategy: str = "auto"    # "auto" | "midrange" | "flagship"
@@ -166,11 +166,13 @@ class FingerprintConfig:
 def _add_common_args(p: argparse.ArgumentParser) -> None:
     """Add arguments shared by every subcommand."""
     p.add_argument(
-        "--csv",
-        dest="accounts_csv",
-        default=os.environ.get("BOOTSUSERS_CSV", "Telegram_70_000_000_[YOSCRYPT].csv"),
-        help="Path to accounts CSV file (phone,session_name[,proxy_*]). "
-             "Default: $BOOTSUSERS_CSV or Telegram_70_000_000_[YOSCRYPT].csv",
+        "--csv-dir",
+        dest="accounts_csv_dir",
+        default=os.environ.get("BOOTSUSERS_CSV_DIR", "accounts"),
+        metavar="DIR",
+        help="Folder that contains account CSV files. "
+             "Every *.csv inside is loaded automatically. "
+             "Default: $BOOTSUSERS_CSV_DIR or 'accounts'",
     )
     p.add_argument(
         "--api-id",
@@ -437,10 +439,12 @@ def _build_fingerprint_parser(sub: argparse._SubParsersAction) -> argparse.Argum
         """),
     )
     p.add_argument(
-        "--csv",
-        dest="accounts_csv",
-        default=os.environ.get("BOOTSUSERS_CSV", "Telegram_70_000_000_[YOSCRYPT].csv"),
-        help="Path to accounts CSV file.",
+        "--csv-dir",
+        dest="accounts_csv_dir",
+        default=os.environ.get("BOOTSUSERS_CSV_DIR", "accounts"),
+        metavar="DIR",
+        help="Folder containing account CSV files (all *.csv files are loaded).  "
+             "Default: accounts  Env: BOOTSUSERS_CSV_DIR",
     )
     p.add_argument(
         "--store",
@@ -455,7 +459,7 @@ def _build_fingerprint_parser(sub: argparse._SubParsersAction) -> argparse.Argum
         default=None,
         metavar="PHONE",
         help="Target a single phone number.  "
-             "If omitted, all accounts in the CSV are targeted.",
+             "If omitted, all accounts in all CSVs are targeted.",
     )
     p.add_argument(
         "--strategy",
@@ -508,16 +512,18 @@ def _build_status_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentPa
             Examples
             --------
             Offline check (fast):
-              python -m utilities.cli status --csv accounts.csv
+              python -m utilities.cli status --csv-dir accounts
 
             Live connection check (slow, makes API calls):
-              python -m utilities.cli status --csv accounts.csv --connect
+              python -m utilities.cli status --csv-dir accounts --connect
         """),
     )
     p.add_argument(
-        "--csv",
-        dest="accounts_csv",
-        default=os.environ.get("BOOTSUSERS_CSV", "Telegram_70_000_000_[YOSCRYPT].csv"),
+        "--csv-dir",
+        dest="accounts_csv_dir",
+        default=os.environ.get("BOOTSUSERS_CSV_DIR", "accounts"),
+        metavar="DIR",
+        help="Folder containing account CSV files.  Default: accounts",
     )
     p.add_argument(
         "--fingerprint-store",
@@ -563,7 +569,7 @@ def _build_status_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentPa
 
 
 def _read_csv_phones(path: str) -> List[str]:
-    """Return list of phone numbers from a CSV file."""
+    """Return list of phone numbers from a single CSV file."""
     phones: List[str] = []
     if not os.path.exists(path):
         logger.error("CSV not found: %s", path)
@@ -574,6 +580,32 @@ def _read_csv_phones(path: str) -> List[str]:
             phone = row.get("phone", "").strip()
             if phone:
                 phones.append(phone)
+    return phones
+
+
+def _read_csv_phones_from_dir(folder: str) -> List[str]:
+    """Return deduplicated phone numbers from ALL *.csv files in *folder*."""
+    import glob as _glob
+    folder_path = os.path.abspath(folder)
+    if not os.path.isdir(folder_path):
+        logger.error("CSV folder not found: %s", folder_path)
+        return []
+    csv_files = sorted(_glob.glob(os.path.join(folder_path, "*.csv")))
+    if not csv_files:
+        logger.error("No .csv files in folder: %s", folder_path)
+        return []
+    phones: List[str] = []
+    seen: set = set()
+    for csv_path in csv_files:
+        try:
+            batch = _read_csv_phones(csv_path)
+            for p in batch:
+                if p not in seen:
+                    seen.add(p)
+                    phones.append(p)
+        except Exception as e:
+            logger.warning("Skipping %s — %s", csv_path, e)
+    logger.debug("_read_csv_phones_from_dir: %d phones from %d file(s)", len(phones), len(csv_files))
     return phones
 
 
@@ -602,7 +634,7 @@ async def _cmd_react(cfg: ReactConfig) -> int:
     auto_react.py; this layer only injects config.
     """
     logger.info("--- react command ---")
-    logger.info("CSV:         %s", cfg.accounts_csv)
+    logger.info("CSV dir:     %s", cfg.accounts_csv_dir)
     logger.info("Mode:        %s", cfg.reaction_mode)
     logger.info("Emoji pool:  %s", cfg.reaction_pool)
     logger.info("Stagger:     %.1f – %.1fs", cfg.stagger_min_sec, cfg.stagger_max_sec)
@@ -623,7 +655,7 @@ async def _cmd_react(cfg: ReactConfig) -> int:
 
     _ar.API_ID                     = cfg.api_id or _ar.API_ID
     _ar.API_HASH                   = cfg.api_hash or _ar.API_HASH
-    _ar.ACCOUNTS_CSV               = cfg.accounts_csv
+    _ar.ACCOUNTS_CSV_DIR           = cfg.accounts_csv_dir
     _ar.REACTION_MODE              = cfg.reaction_mode       # type: ignore[attr-defined]
     _ar.STAGGER_MIN_SEC            = cfg.stagger_min_sec
     _ar.STAGGER_MAX_SEC            = cfg.stagger_max_sec
@@ -644,7 +676,7 @@ async def _cmd_react(cfg: ReactConfig) -> int:
                 FingerprintRandomizer,
                 apply_fingerprints,
             )
-            phones = _read_csv_phones(cfg.accounts_csv)
+            phones = _read_csv_phones_from_dir(cfg.accounts_csv_dir)
             fp_rand = FingerprintRandomizer(
                 store_path=cfg.fingerprint_store or "fingerprints.json"
             )
@@ -680,7 +712,7 @@ async def _cmd_react(cfg: ReactConfig) -> int:
 async def _cmd_join(cfg: JoinConfig) -> int:
     """Launch the join bot."""
     logger.info("--- join command ---")
-    logger.info("CSV:         %s", cfg.accounts_csv)
+    logger.info("CSV dir:     %s", cfg.accounts_csv_dir)
 
     # Resolve targets
     targets: List[str] = list(cfg.targets)
@@ -710,7 +742,7 @@ async def _cmd_join(cfg: JoinConfig) -> int:
 
     _aj.API_ID                  = cfg.api_id or _aj.API_ID        # type: ignore[attr-defined]
     _aj.API_HASH                = cfg.api_hash or _aj.API_HASH    # type: ignore[attr-defined]
-    _aj.ACCOUNTS_CSV            = cfg.accounts_csv
+    _aj.ACCOUNTS_CSV_DIR        = cfg.accounts_csv_dir
     _aj.BATCH_SIZE              = cfg.batch_size
     _aj.JOIN_DELAY_SEC          = cfg.delay_between_joins
     _aj.BATCH_DELAY_SEC         = cfg.delay_between_batches
@@ -719,7 +751,7 @@ async def _cmd_join(cfg: JoinConfig) -> int:
     if cfg.use_fingerprints:
         try:
             from utilities.fingerprint_randomizer import FingerprintRandomizer
-            phones = _read_csv_phones(cfg.accounts_csv)
+            phones = _read_csv_phones_from_dir(cfg.accounts_csv_dir)
             fp_rand = FingerprintRandomizer(
                 store_path=cfg.fingerprint_store or "fingerprints.json"
             )
@@ -774,9 +806,9 @@ def _cmd_fingerprint(cfg: FingerprintConfig) -> int:
     action = cfg.action
 
     if action == "report":
-        phones = _read_csv_phones(cfg.accounts_csv) if not cfg.phone else [cfg.phone]
+        phones = _read_csv_phones_from_dir(cfg.accounts_csv_dir) if not cfg.phone else [cfg.phone]
         if not phones:
-            logger.error("No phones found in %s", cfg.accounts_csv)
+            logger.error("No phones found in %s", cfg.accounts_csv_dir)
             return 1
         # generate any missing
         fp.bulk_create(phones)
@@ -784,9 +816,9 @@ def _cmd_fingerprint(cfg: FingerprintConfig) -> int:
         return 0
 
     if action == "generate":
-        phones = _read_csv_phones(cfg.accounts_csv) if not cfg.phone else [cfg.phone]
+        phones = _read_csv_phones_from_dir(cfg.accounts_csv_dir) if not cfg.phone else [cfg.phone]
         if not phones:
-            logger.error("No phones found in %s", cfg.accounts_csv)
+            logger.error("No phones found in %s", cfg.accounts_csv_dir)
             return 1
         created = 0
         for phone in phones:
@@ -806,9 +838,9 @@ def _cmd_fingerprint(cfg: FingerprintConfig) -> int:
                 logger.error("No fingerprint found for %s", cfg.phone)
                 return 1
         else:
-            phones = _read_csv_phones(cfg.accounts_csv)
+            phones = _read_csv_phones_from_dir(cfg.accounts_csv_dir)
             if not phones:
-                logger.error("No phones found in %s", cfg.accounts_csv)
+                logger.error("No phones found in %s", cfg.accounts_csv_dir)
                 return 1
             results = fp.rotate_many(phones)
             logger.info("Rotated %d fingerprints", len(results))
@@ -838,7 +870,7 @@ def _cmd_fingerprint(cfg: FingerprintConfig) -> int:
 
 
 async def _cmd_status(
-    accounts_csv: str,
+    accounts_csv_dir: str,
     fingerprint_store: Optional[str],
     live_connect: bool,
     api_id: int,
@@ -846,15 +878,31 @@ async def _cmd_status(
     output_json: bool,
 ) -> int:
     """Print a health status table for all accounts."""
-    if not os.path.exists(accounts_csv):
-        logger.error("CSV not found: %s", accounts_csv)
+    import glob as _glob
+    folder_path = os.path.abspath(accounts_csv_dir)
+    if not os.path.isdir(folder_path):
+        logger.error("CSV folder not found: %s", folder_path)
+        return 1
+
+    csv_files = sorted(_glob.glob(os.path.join(folder_path, "*.csv")))
+    if not csv_files:
+        logger.error("No .csv files in folder: %s", folder_path)
         return 1
 
     rows: List[dict] = []
-    with open(accounts_csv, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append({k: v.strip() for k, v in row.items()})
+    seen_phones: set = set()
+    for csv_path in csv_files:
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    cleaned = {k: v.strip() for k, v in row.items()}
+                    phone = cleaned.get("phone", "")
+                    if phone and phone not in seen_phones:
+                        seen_phones.add(phone)
+                        rows.append(cleaned)
+        except Exception as e:
+            logger.warning("Skipping %s — %s", csv_path, e)
 
     # Load fingerprint store if available
     fp_map: Dict[str, bool] = {}
@@ -1069,7 +1117,7 @@ def _args_to_react_config(args: argparse.Namespace) -> ReactConfig:
     return ReactConfig(
         api_id=args.api_id,
         api_hash=args.api_hash,
-        accounts_csv=args.accounts_csv,
+        accounts_csv_dir=args.accounts_csv_dir,
         sender_csv=getattr(args, "sender_csv", None),
         reaction_pool=getattr(args, "reaction_pool", None) or None,
         reaction_mode=getattr(args, "reaction_mode", "staggered"),
@@ -1089,7 +1137,7 @@ def _args_to_join_config(args: argparse.Namespace) -> JoinConfig:
     return JoinConfig(
         api_id=args.api_id,
         api_hash=args.api_hash,
-        accounts_csv=args.accounts_csv,
+        accounts_csv_dir=args.accounts_csv_dir,
         targets=getattr(args, "targets", []) or [],
         targets_file=getattr(args, "targets_file", None),
         batch_size=getattr(args, "batch_size", 5),
@@ -1106,7 +1154,7 @@ def _args_to_join_config(args: argparse.Namespace) -> JoinConfig:
 
 def _args_to_fingerprint_config(args: argparse.Namespace) -> FingerprintConfig:
     return FingerprintConfig(
-        accounts_csv=args.accounts_csv,
+        accounts_csv_dir=args.accounts_csv_dir,
         store_path=args.store_path,
         phone=args.phone,
         strategy=args.strategy,
@@ -1139,7 +1187,7 @@ def _build_root_parser() -> argparse.ArgumentParser:
 
             Environment variables
             ---------------------
-            BOOTSUSERS_CSV       — default accounts CSV path
+            BOOTSUSERS_CSV_DIR   — default accounts CSV folder path
             BOOTSUSERS_FP_STORE  — default fingerprint store path
             TELEGRAM_API_ID      — Telegram API ID (overrides --api-id)
             TELEGRAM_API_HASH    — Telegram API hash (overrides --api-hash)
@@ -1204,7 +1252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "status":
         return asyncio.run(
             _cmd_status(
-                accounts_csv=args.accounts_csv,
+                accounts_csv_dir=args.accounts_csv_dir,
                 fingerprint_store=args.fingerprint_store,
                 live_connect=args.live_connect,
                 api_id=args.api_id,
