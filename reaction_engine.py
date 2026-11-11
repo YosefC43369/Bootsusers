@@ -8,18 +8,6 @@ Provides:
   - PriorityReactionJob    : a queued work unit with priority level
   - ReactionEngine         : orchestrates queue → rate-limit → send loop
   - EngineMetrics          : live counters exposed for dashboard/reporter use
-
-Usage in auto_react.py:
-  from reaction_engine import ReactionEngine, ChatConfig, ChatConfigRegistry
-
-  registry = ChatConfigRegistry.load("chat_configs.json")
-  engine   = ReactionEngine(accounts=reactors, registry=registry)
-
-  # inside on_send:
-  await engine.enqueue(chat_id=event.chat_id, msg_id=event.message.id, priority=1)
-
-  # start the engine somewhere in main():
-  asyncio.create_task(engine.run())
 """
 
 from __future__ import annotations
@@ -720,49 +708,3 @@ class QueueInspector:
                 bar = "█" * min(cnt, 30)
                 print(f"    {phone:<18} {cnt:>5}  {bar}")
         print("────────────────────────────────────────────────\n")
-
-
-# ─── HOW TO WIRE INTO auto_react.py ───────────────────────────────────────────
-#
-# 1. Import at top of auto_react.py:
-#
-#      from reaction_engine import (
-#          ReactionEngine, ChatConfigRegistry, Priority, QueueInspector
-#      )
-#
-# 2. In main(), after connect_all():
-#
-#      registry = ChatConfigRegistry.load("chat_configs.json")
-#      engine   = ReactionEngine(
-#          accounts     = reactors,
-#          registry     = registry,
-#          concurrency  = 5,
-#          worker_count = 3,
-#      )
-#      asyncio.create_task(engine.run())
-#
-#      inspector = QueueInspector(engine)
-#
-# 3. Inside on_send:
-#
-#      @sender.client.on(events.NewMessage(outgoing=True))
-#      async def on_send(event):
-#          await engine.enqueue(
-#              chat_id  = event.chat_id,
-#              msg_id   = event.message.id,
-#              priority = Priority.NORMAL,
-#          )
-#
-# 4. Blacklist a chat at runtime:
-#
-#      registry.blacklist(chat_id=-1001234567890, reason="spam")
-#
-# 5. High-priority react (e.g. someone replied to the sender):
-#
-#      await engine.enqueue(chat_id=chat_id, msg_id=reply_id, priority=Priority.HIGH)
-#
-# 6. Print live stats:
-#
-#      inspector.print_report()
-#
-# ─────────────────────────────────────────────────────────────────────────────
