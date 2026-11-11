@@ -7,6 +7,7 @@ import time
 import logging
 import threading
 import statistics
+from account_manager import build_account_manager
 from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Optional, Literal
@@ -31,6 +32,11 @@ JOIN_DELAY_MAX = 8.0
 
 ACCOUNTS_CSV = "Telegram_70_000_000_[YOSCRYPT].csv"   # columns: phone, session_name
 # ──────────────────────────────────────────────────────────────────────────────
+
+mgr = await build_account_manager(flood_guard=flood_guard, concurrency=3)
+async with mgr:
+    acc = await mgr.acquire()
+    # acc.client ready use
 
 
 # ─── ENUMS ────────────────────────────────────────────────────────────────────
