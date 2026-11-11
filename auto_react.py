@@ -9,12 +9,16 @@ import itertools
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+from reaction_engine import ReactionEngine, ChatConfig, ChatConfigRegistry
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
+
+registry = ChatConfigRegistry.load("chat_configs.json")
+engine   = ReactionEngine(accounts=reactors, registry=registry)
 
 API_ID   = 34674448
 API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
@@ -352,6 +356,7 @@ async def main() -> None:
 
     # start health-check background task
     asyncio.create_task(health_check_loop(accounts, HEALTH_CHECK_INTERVAL))
+    asyncio.create_task(engine.run())
 
     print(f"\n[*] listening for outgoing messages on {sender.phone} ...")
     print(f"    reaction pool : {REACTION_POOL}")
@@ -364,6 +369,7 @@ async def main() -> None:
         chat_id = event.chat_id
         msg_id  = event.message.id
         print(f"\n[>] sent msg {msg_id} in {chat_id} — triggering reactions")
+        await engine.enqueue(chat_id=event.chat_id, msg_id=event.message.id, priority=1)
         await react_all(reactors, chat_id, msg_id)
 
     await sender.client.run_until_disconnected()
