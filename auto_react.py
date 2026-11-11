@@ -12,8 +12,8 @@ from telethon.tl.types import ReactionEmoji
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_ID   = 0          # your Telegram app API ID  (from my.telegram.org)
-API_HASH = ""         # your Telegram app API hash
+API_ID   = 34674448
+API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
 
 REACTION_EMOJI = "👍"           # emoji to send as reaction
 REACTION_MODE: Literal["simultaneous", "staggered"] = "staggered"
