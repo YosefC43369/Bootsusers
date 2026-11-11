@@ -12,8 +12,8 @@ from telethon.errors import UserAlreadyParticipantError, InviteHashExpiredError
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-API_ID   = 0
-API_HASH = ""
+API_ID   = 34674448
+API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
 
 # use either a public username/link  e.g. "t.me/example"  or  "example"
 # for private invite links use the hash only: "AbCdEfGhIj..."
