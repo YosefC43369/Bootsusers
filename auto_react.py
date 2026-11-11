@@ -13,6 +13,7 @@ from typing import Optional
 from reaction_engine import (
     ReactionEngine, ChatConfigRegistry, Priority, QueueInspector
 )
+from utilities.message_listener import import MessageListener, EventKind
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
@@ -38,6 +39,12 @@ ACCOUNTS_CSV = "Telegram_70_000_000_[YOSCRYPT].csv"   # columns: phone, session_
 
 mgr = await build_account_manager(flood_guard=flood_guard)
 reactors = await get_joined_accounts(mgr, TARGET_CHANNEL)
+
+listener = MessageListener(sender_account.client)
+listener.on(EventKind.OUTGOING_MESSAGE, reaction_engine.handle_outgoing)
+await listener.start()
+await sender_account.client.run_until_disconnected()
+await listener.stop()
 
 
 @dataclass
