@@ -6,6 +6,7 @@ import random
 import time
 import threading
 import itertools
+from account_manager import build_account_manager, get_joined_accounts
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -34,6 +35,9 @@ MIN_GAP_BETWEEN_REACTIONS  = 2.0   # minimum seconds between reactions (same acc
 
 ACCOUNTS_CSV = "Telegram_70_000_000_[YOSCRYPT].csv"   # columns: phone, session_name
 # ──────────────────────────────────────────────────────────────────────────────
+
+mgr = await build_account_manager(flood_guard=flood_guard)
+reactors = await get_joined_accounts(mgr, TARGET_CHANNEL)
 
 
 @dataclass
