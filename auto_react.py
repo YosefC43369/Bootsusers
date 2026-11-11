@@ -9,16 +9,15 @@ import itertools
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
-from reaction_engine import ReactionEngine, ChatConfig, ChatConfigRegistry
+from reaction_engine import (
+    ReactionEngine, ChatConfigRegistry, Priority, QueueInspector
+)
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-
-registry = ChatConfigRegistry.load("chat_configs.json")
-engine   = ReactionEngine(accounts=reactors, registry=registry)
 
 API_ID   = 34674448
 API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
@@ -346,6 +345,17 @@ HEALTH_CHECK_INTERVAL = 120.0   # seconds between each health-check sweep
 async def main() -> None:
     accounts = load_accounts(ACCOUNTS_CSV)
     await connect_all(accounts)
+    
+    registry = ChatConfigRegistry.load("chat_configs.json")
+    engine   = ReactionEngine(
+        accounts     = reactors,
+        registry     = registry,
+        concurrency  = 5,
+        worker_count = 3,
+    )
+    asyncio.create_task(engine.run())
+    
+    inspector = QueueInspector(engine)
 
     # initialise per-account emoji iterators
     for acc in accounts:
@@ -356,7 +366,6 @@ async def main() -> None:
 
     # start health-check background task
     asyncio.create_task(health_check_loop(accounts, HEALTH_CHECK_INTERVAL))
-    asyncio.create_task(engine.run())
 
     print(f"\n[*] listening for outgoing messages on {sender.phone} ...")
     print(f"    reaction pool : {REACTION_POOL}")
@@ -366,13 +375,16 @@ async def main() -> None:
 
     @sender.client.on(events.NewMessage(outgoing=True))
     async def on_send(event):
-        chat_id = event.chat_id
-        msg_id  = event.message.id
-        print(f"\n[>] sent msg {msg_id} in {chat_id} — triggering reactions")
-        await engine.enqueue(chat_id=event.chat_id, msg_id=event.message.id, priority=1)
-        await react_all(reactors, chat_id, msg_id)
+        await engine.enqueue(
+            chat_id  = event.chat_id,
+            msg_id   = event.message.id,
+            priority = Priority.NORMAL,
+        )
 
     await sender.client.run_until_disconnected()
+    registry.blacklist(chat_id=-1001234567890, reason="spam")
+    await engine.enqueue(chat_id=chat_id, msg_id=reply_id, priority=Priority.HIGH)
+    inspector.print_report()
 
 
 if __name__ == "__main__":
