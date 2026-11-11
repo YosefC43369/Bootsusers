@@ -1,112 +1,127 @@
-"""
-reaction_engine.py — core engine for auto_react.
-
-Provides:
-  - ReactionQueue          : priority-aware async queue with per-chat emoji config
-  - ChatConfig             : per-chat settings (custom emoji pool, blacklist flag)
-  - ChatConfigRegistry     : load/save chat configs from JSON
-  - PriorityReactionJob    : a queued work unit with priority level
-  - ReactionEngine         : orchestrates queue → rate-limit → send loop
-  - EngineMetrics          : live counters exposed for dashboard/reporter use
-"""
+# reaction_engine.py
+# connect_all() has run.
+#
+# Wiring (in auto_react.py main()):
+#   from reaction_engine import ReactionEngine, ChatConfigRegistry
+#   registry = ChatConfigRegistry("chat_config.json")
+#   engine   = ReactionEngine(accounts, registry, concurrency=5)
+#   asyncio.create_task(engine.run())
+#   # In the NewMessage handler:
+#   await engine.enqueue(chat_id, msg_id)
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
+import math
 import random
-import time
 import threading
-import itertools
-from collections import defaultdict, deque
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from enum import IntEnum, auto
+from enum import IntEnum
 from pathlib import Path
-from typing import Optional, Callable, Awaitable
+from typing import Callable, Optional
 
-from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
-from telethon.errors import FloodWaitError, UserDeactivatedBanError
+logger = logging.getLogger(__name__)
 
-
-# ─── RE-USE TYPES FROM auto_react ─────────────────────────────────────────────
-# We import the live objects so we do not duplicate dataclass definitions.
-# If reaction_engine is run standalone (tests, etc.) we provide minimal stubs.
-
+# ── try to import real types from auto_react; fall back to stubs ──────────────
 try:
-    from auto_react import Account, RateLimiter, REACTION_POOL
-except ImportError:  # pragma: no cover
-    # minimal stubs so the module imports cleanly in isolation
+    from auto_react import (
+        Account,
+        RateLimiter,
+        REACTION_POOL,
+        MIN_GAP_BETWEEN_REACTIONS,
+        MAX_REACTIONS_PER_HOUR,
+        send_reaction,
+    )
+    _STUB_MODE = False
+except ImportError:
+    logger.warning("auto_react not found — running in stub mode")
+    _STUB_MODE = True
+
+    # ── minimal stubs for standalone testing ──────────────────────────────────
+    REACTION_POOL         = ["👍", "❤️", "🔥", "🎉", "👏"]
+    MIN_GAP_BETWEEN_REACTIONS = 2.0
+    MAX_REACTIONS_PER_HOUR    = 30
+
+    class _RateLimiter:
+        def __init__(self, max_per_hour: int = 30, min_gap: float = 2.0):
+            self.max_per_hour = max_per_hour
+            self.min_gap      = min_gap
+            self._lock        = threading.Lock()
+            self._timestamps: list[float] = []
+            self._last_send   = 0.0
+
+        def can_send(self) -> bool:
+            now = time.monotonic()
+            with self._lock:
+                self._timestamps = [t for t in self._timestamps if now - t < 3600]
+                if len(self._timestamps) >= self.max_per_hour:
+                    return False
+                if now - self._last_send < self.min_gap:
+                    return False
+                return True
+
+        def mark_sent(self):
+            now = time.monotonic()
+            with self._lock:
+                self._timestamps.append(now)
+                self._last_send = now
+
+    RateLimiter = _RateLimiter
+
     @dataclass
-    class Account:  # type: ignore[no-redef]
-        phone: str
+    class Account:
+        phone:   str
         session: str
-        client: object = None
+        proxy:   object = None
+        limiter: _RateLimiter = field(default_factory=_RateLimiter)
+        client:  object = None
         _consecutive_failures: int = 0
         MAX_FAILURES: int = 5
-        def is_healthy(self) -> bool: return self._consecutive_failures < self.MAX_FAILURES
-        def mark_ok(self) -> None:    self._consecutive_failures = 0
-        def mark_fail(self) -> None:  self._consecutive_failures += 1
 
-    class RateLimiter:  # type: ignore[no-redef]
-        def allowed(self) -> bool:              return True
-        def record(self) -> None:               pass
-        def seconds_until_allowed(self) -> float: return 0.0
+        def is_healthy(self)  -> bool: return self._consecutive_failures < self.MAX_FAILURES
+        def mark_ok(self)           : self._consecutive_failures = 0
+        def mark_fail(self)         : self._consecutive_failures += 1
 
-    REACTION_POOL: list[str] = ["👍", "❤️", "🔥", "🎉", "👏"]
-
-
-# ─── LOGGING ──────────────────────────────────────────────────────────────────
-
-log = logging.getLogger("reaction_engine")
+    async def send_reaction(acc: Account, chat_id: int, msg_id: int) -> bool:
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        logger.debug("[stub] send_reaction acc=%s chat=%s msg=%s",
+                     acc.phone, chat_id, msg_id)
+        return True
 
 
-# ─── PRIORITY LEVELS ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PRIORITY ENUM
+# ══════════════════════════════════════════════════════════════════════════════
 
 class Priority(IntEnum):
-    """
-    Reaction job priority.
-
-    LOW     = background reactions (auto-triggered, low importance chats)
-    NORMAL  = standard auto-react triggered by on_send
-    HIGH    = manually enqueued or escalated (e.g. replies to the sender)
-    URGENT  = force-react regardless of normal rate limits (use sparingly)
-    """
     LOW    = 0
     NORMAL = 1
     HIGH   = 2
     URGENT = 3
 
 
-# ─── PER-CHAT CONFIGURATION ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHAT CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class ChatConfig:
-    """
-    Per-chat settings for the reaction engine.
-
-    Fields
-    ------
-    chat_id         : Telegram chat ID (integer or negative for channels)
-    blacklisted     : if True, the engine will never react in this chat
-    emoji_pool      : custom emoji list; if empty, falls back to global REACTION_POOL
-    max_per_hour    : override per-hour cap for this chat (0 = use account limiter default)
-    min_gap_sec     : override minimum gap between reactions in this chat (0 = use default)
-    priority_boost  : add this value to every job's priority when it comes from this chat
-    notes           : free-form annotation (not used by engine logic)
-    """
-    chat_id:        int
-    blacklisted:    bool       = False
-    emoji_pool:     list[str]  = field(default_factory=list)
-    max_per_hour:   int        = 0
-    min_gap_sec:    float      = 0.0
-    priority_boost: int        = 0
-    notes:          str        = ""
+    """Per-chat reaction settings.  Stored and loaded from JSON."""
+    chat_id:       int
+    blacklisted:   bool      = False
+    emoji_pool:    list[str] = field(default_factory=list)
+    max_per_hour:  int       = 0        # 0 = use global default
+    min_gap_sec:   float     = 0.0      # 0.0 = use global default
+    priority_boost: int      = 0        # added to incoming priority
+    notes:         str       = ""
 
     def effective_emoji_pool(self) -> list[str]:
-        """Return this chat's emoji pool, or the global fallback."""
-        return self.emoji_pool if self.emoji_pool else REACTION_POOL
+        return self.emoji_pool if self.emoji_pool else list(REACTION_POOL)
 
     def to_dict(self) -> dict:
         return {
@@ -120,7 +135,7 @@ class ChatConfig:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> ChatConfig:
+    def from_dict(cls, d: dict) -> "ChatConfig":
         return cls(
             chat_id        = int(d["chat_id"]),
             blacklisted    = bool(d.get("blacklisted", False)),
@@ -132,92 +147,83 @@ class ChatConfig:
         )
 
 
-# ─── CHAT CONFIG REGISTRY ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHAT CONFIG REGISTRY
+# ══════════════════════════════════════════════════════════════════════════════
 
 class ChatConfigRegistry:
     """
-    Loads, stores and hot-reloads per-chat config from a JSON file.
-
-    JSON format:
-      [
-        {"chat_id": -1001234567890, "blacklisted": false, "emoji_pool": ["🔥","👏"]},
-        {"chat_id": -1009876543210, "blacklisted": true,  "notes": "spam channel"},
-        ...
-      ]
-
-    If the file does not exist it is created as an empty list on first save.
-    Thread-safe reads; write operations acquire _lock.
+    JSON-backed per-chat config store.
+    Thread-safe; reloads from disk when the file changes (mtime-checked).
     """
 
-    def __init__(self, path: str | Path = "chat_configs.json"):
-        self._path: Path                     = Path(path)
-        self._configs: dict[int, ChatConfig] = {}
-        self._lock = threading.Lock()
+    def __init__(self, path: str = "chat_config.json"):
+        self._path:    Path                   = Path(path)
+        self._lock:    threading.Lock         = threading.Lock()
+        self._configs: dict[int, ChatConfig]  = {}
+        self._mtime:   float                  = 0.0
+        self.load()
 
     # ── persistence ──────────────────────────────────────────────────────────
 
-    @classmethod
-    def load(cls, path: str | Path = "chat_configs.json") -> ChatConfigRegistry:
-        """Create a registry and load existing config file (if any)."""
-        reg = cls(path)
-        reg.reload()
-        return reg
-
-    def reload(self) -> None:
-        """Re-read the JSON file from disk.  Safe to call at any time."""
+    def load(self) -> None:
         if not self._path.exists():
-            log.info(f"chat config file not found ({self._path}), starting empty")
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            mtime = self._path.stat().st_mtime
             with self._lock:
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
                 self._configs = {
-                    int(entry["chat_id"]): ChatConfig.from_dict(entry)
-                    for entry in raw
+                    int(k): ChatConfig.from_dict(v)
+                    for k, v in raw.items()
                 }
-            log.info(f"loaded {len(self._configs)} chat configs from {self._path}")
+                self._mtime = mtime
         except Exception as e:
-            log.error(f"failed to load chat configs: {e}")
+            logger.warning("ChatConfigRegistry.load: %s", e)
+
+    def reload(self) -> bool:
+        """Reload only if file changed on disk.  Returns True if reloaded."""
+        if not self._path.exists():
+            return False
+        mtime = self._path.stat().st_mtime
+        if mtime != self._mtime:
+            self.load()
+            return True
+        return False
 
     def save(self) -> None:
-        """Persist current state to the JSON file."""
         with self._lock:
-            data = [cfg.to_dict() for cfg in self._configs.values()]
+            data = {str(k): v.to_dict() for k, v in self._configs.items()}
         try:
             self._path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            log.info(f"saved {len(data)} chat configs to {self._path}")
+            self._mtime = self._path.stat().st_mtime
         except Exception as e:
-            log.error(f"failed to save chat configs: {e}")
+            logger.error("ChatConfigRegistry.save: %s", e)
 
-    # ── access ───────────────────────────────────────────────────────────────
+    # ── accessors ─────────────────────────────────────────────────────────────
 
     def get(self, chat_id: int) -> ChatConfig:
-        """Return the config for chat_id, or a fresh default if not found."""
         with self._lock:
             return self._configs.get(chat_id, ChatConfig(chat_id=chat_id))
 
     def set(self, cfg: ChatConfig) -> None:
-        """Add or replace a config entry."""
         with self._lock:
             self._configs[cfg.chat_id] = cfg
+        self.save()
 
     def blacklist(self, chat_id: int, reason: str = "") -> None:
-        """Convenience: blacklist a chat and persist."""
         cfg = self.get(chat_id)
         cfg.blacklisted = True
         cfg.notes       = reason or cfg.notes
         self.set(cfg)
-        self.save()
 
     def whitelist(self, chat_id: int) -> None:
-        """Remove blacklist flag and persist."""
         cfg = self.get(chat_id)
         cfg.blacklisted = False
         self.set(cfg)
-        self.save()
 
     def is_blacklisted(self, chat_id: int) -> bool:
         return self.get(chat_id).blacklisted
@@ -227,110 +233,121 @@ class ChatConfigRegistry:
             return list(self._configs.values())
 
 
-# ─── REACTION JOB ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PRIORITY REACTION JOB
+# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass(order=True)
 class PriorityReactionJob:
     """
-    A single unit of work for the reaction engine.
-
-    sort_key    : lower value = higher priority in a min-heap.
-                  We negate priority so URGENT (3) → sort_key = -3, pops first.
-    enqueued_at : monotonic timestamp for age-based tie-breaking and metrics.
+    Sortable job for asyncio.PriorityQueue.
+    Lower sort_key = pops first → negate priority so URGENT=3 → sort_key=-3.
     """
-    sort_key:    float = field(compare=True,  default=0.0)
-    chat_id:     int   = field(compare=False, default=0)
-    msg_id:      int   = field(compare=False, default=0)
-    priority:    int   = field(compare=False, default=Priority.NORMAL)
-    enqueued_at: float = field(compare=False, default_factory=time.monotonic)
-    # optional: a specific subset of accounts to use (None = use all)
-    account_filter: Optional[set[str]] = field(compare=False, default=None)
+    sort_key:       int            = field(compare=True)
+    chat_id:        int            = field(compare=False)
+    msg_id:         int            = field(compare=False)
+    priority:       Priority       = field(compare=False, default=Priority.NORMAL)
+    enqueued_at:    float          = field(compare=False, default_factory=time.monotonic)
+    account_filter: Optional[list] = field(compare=False, default=None)
+    # account_filter: list[str] of phone numbers to restrict to, or None = all
 
     @classmethod
     def make(
         cls,
         chat_id:        int,
         msg_id:         int,
-        priority:       int   = Priority.NORMAL,
-        account_filter: Optional[set[str]] = None,
-    ) -> PriorityReactionJob:
+        priority:       Priority       = Priority.NORMAL,
+        account_filter: Optional[list] = None,
+        priority_boost: int            = 0,
+    ) -> "PriorityReactionJob":
+        effective = min(Priority.URGENT, priority + priority_boost)
         return cls(
-            sort_key       = -float(priority),   # negate: higher priority → smaller key
+            sort_key       = -int(effective),
             chat_id        = chat_id,
             msg_id         = msg_id,
-            priority       = priority,
-            enqueued_at    = time.monotonic(),
+            priority       = Priority(effective),
             account_filter = account_filter,
         )
 
 
-# ─── METRICS ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  ENGINE METRICS
+# ══════════════════════════════════════════════════════════════════════════════
 
-@dataclass
 class EngineMetrics:
     """
-    Live counters — thread-safe via threading.Lock.
-    Exposed for integration with metrics.py / dashboard.py.
+    Thread-safe counters + rolling-window latency tracker.
+    All public methods are safe to call from any thread or coroutine.
     """
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    total_enqueued:  int = 0
-    total_sent:      int = 0
-    total_skipped:   int = 0   # rate-limited or unhealthy
-    total_failed:    int = 0   # Telethon errors
-    total_flooded:   int = 0   # FloodWaitError events
-    total_banned:    int = 0   # UserDeactivatedBanError
-    blacklist_drops: int = 0   # jobs dropped at enqueue time
+    def __init__(self):
+        self._lock = threading.Lock()
+        # global counters
+        self.total_enqueued:  int = 0
+        self.total_sent:      int = 0
+        self.total_skipped:   int = 0
+        self.total_failed:    int = 0
+        self.total_flooded:   int = 0
+        self.total_banned:    int = 0
+        self.blacklist_drops: int = 0
+        # per-chat  {chat_id: {"sent":n,"failed":n}}
+        self._per_chat:    dict[int, dict] = {}
+        # per-account {phone: {"sent":n,"failed":n}}
+        self._per_account: dict[str, dict] = {}
+        # latency ring buffer (seconds from enqueue to send)
+        self._latencies: deque[float] = deque(maxlen=200)
 
-    # running totals per chat  (chat_id → sent count)
-    per_chat: dict[int, int] = field(default_factory=dict)
-    # running totals per account (phone → sent count)
-    per_account: dict[str, int] = field(default_factory=dict)
+    # ── bump helpers ──────────────────────────────────────────────────────────
 
-    # timing — last N send latencies (seconds) for P50/P95 calcs
-    _latencies: deque = field(
-        default_factory=lambda: deque(maxlen=200), repr=False
-    )
-
-    def bump_enqueued(self):
-        with self._lock: self.total_enqueued += 1
+    def bump_enqueued(self, n: int = 1):
+        with self._lock: self.total_enqueued += n
 
     def bump_sent(self, chat_id: int, phone: str, latency: float):
         with self._lock:
             self.total_sent += 1
-            self.per_chat[chat_id]    = self.per_chat.get(chat_id, 0) + 1
-            self.per_account[phone]   = self.per_account.get(phone, 0) + 1
             self._latencies.append(latency)
+            self._per_chat.setdefault(chat_id, {"sent": 0, "failed": 0})
+            self._per_chat[chat_id]["sent"] += 1
+            self._per_account.setdefault(phone, {"sent": 0, "failed": 0})
+            self._per_account[phone]["sent"] += 1
 
-    def bump_skipped(self):
-        with self._lock: self.total_skipped += 1
+    def bump_skipped(self, n: int = 1):
+        with self._lock: self.total_skipped += n
 
-    def bump_failed(self):
-        with self._lock: self.total_failed += 1
-
-    def bump_flooded(self):
-        with self._lock: self.total_flooded += 1
-
-    def bump_banned(self):
-        with self._lock: self.total_banned += 1
-
-    def bump_blacklist_drop(self):
-        with self._lock: self.blacklist_drops += 1
-
-    def latency_p50(self) -> float:
-        """Median send latency over the last 200 operations."""
+    def bump_failed(self, chat_id: int, phone: str):
         with self._lock:
-            if not self._latencies:
-                return 0.0
-            s = sorted(self._latencies)
-            return s[len(s) // 2]
+            self.total_failed += 1
+            self._per_chat.setdefault(chat_id, {"sent": 0, "failed": 0})
+            self._per_chat[chat_id]["failed"] += 1
+            self._per_account.setdefault(phone, {"sent": 0, "failed": 0})
+            self._per_account[phone]["failed"] += 1
 
-    def latency_p95(self) -> float:
+    def bump_flooded(self, n: int = 1):
+        with self._lock: self.total_flooded += n
+
+    def bump_banned(self, phone: str):
         with self._lock:
-            if not self._latencies:
-                return 0.0
-            s = sorted(self._latencies)
-            return s[int(len(s) * 0.95)]
+            self.total_banned += 1
+            self._per_account.setdefault(phone, {"sent": 0, "failed": 0})
+            self._per_account[phone]["failed"] += 1
+
+    def bump_blacklist_drop(self, n: int = 1):
+        with self._lock: self.blacklist_drops += n
+
+    # ── percentile latency ────────────────────────────────────────────────────
+
+    def _percentile(self, pct: float) -> float:
+        with self._lock:
+            data = sorted(self._latencies)
+        if not data:
+            return 0.0
+        idx = max(0, min(len(data) - 1, int(math.ceil(len(data) * pct / 100)) - 1))
+        return data[idx]
+
+    def latency_p50(self) -> float: return self._percentile(50)
+    def latency_p95(self) -> float: return self._percentile(95)
+
+    # ── snapshot ──────────────────────────────────────────────────────────────
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -342,369 +359,376 @@ class EngineMetrics:
                 "total_flooded":   self.total_flooded,
                 "total_banned":    self.total_banned,
                 "blacklist_drops": self.blacklist_drops,
-                "latency_p50_ms":  round(self.latency_p50() * 1000, 1),
-                "latency_p95_ms":  round(self.latency_p95() * 1000, 1),
-                "per_chat":        dict(self.per_chat),
-                "per_account":     dict(self.per_account),
+                "latency_p50":     self.latency_p50(),
+                "latency_p95":     self.latency_p95(),
+                "top_chats": sorted(
+                    self._per_chat.items(),
+                    key=lambda kv: kv[1]["sent"],
+                    reverse=True,
+                )[:10],
+                "top_accounts": sorted(
+                    self._per_account.items(),
+                    key=lambda kv: kv[1]["sent"],
+                    reverse=True,
+                ),
             }
 
+    def log_summary(self):
+        s = self.snapshot()
+        logger.info(
+            "[metrics] enqueued=%d sent=%d skipped=%d failed=%d "
+            "flooded=%d banned=%d blk_drops=%d p50=%.2fs p95=%.2fs",
+            s["total_enqueued"], s["total_sent"], s["total_skipped"],
+            s["total_failed"], s["total_flooded"], s["total_banned"],
+            s["blacklist_drops"], s["latency_p50"], s["latency_p95"],
+        )
 
-# ─── PER-ACCOUNT EMOJI STATE ──────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  EMOJI CYCLER
+# ══════════════════════════════════════════════════════════════════════════════
 
 class EmojiCycler:
     """
-    Maintains a per-(account, chat) emoji iterator so each account cycles
-    through the emoji pool independently, and different chats can have
-    different pools without interfering.
-
-      cycler = EmojiCycler()
-      emoji  = cycler.next(phone=acc.phone, chat_id=chat_id, pool=["👍","❤️"])
+    Per-(phone, chat_id) emoji iterator with random starting offset.
+    All 10 accounts start at different positions so the first N reactions
+    are spread across the pool rather than all 👍.
     """
 
     def __init__(self):
-        # (phone, chat_id) → itertools.cycle
         self._iters: dict[tuple[str, int], itertools.cycle] = {}
         self._lock = threading.Lock()
 
+    def _key(self, phone: str, chat_id: int) -> tuple[str, int]:
+        return (phone, chat_id)
+
+    def _make_iter(self, pool: list[str]) -> itertools.cycle:
+        shuffled = list(pool)
+        offset   = random.randint(0, max(0, len(shuffled) - 1))
+        shuffled = shuffled[offset:] + shuffled[:offset]
+        return itertools.cycle(shuffled)
+
     def next(self, phone: str, chat_id: int, pool: list[str]) -> str:
-        key = (phone, chat_id)
+        key = self._key(phone, chat_id)
         with self._lock:
             if key not in self._iters:
-                # start at a random offset so accounts don't all begin on 👍
-                offset = random.randint(0, max(len(pool) - 1, 0))
-                shifted = pool[offset:] + pool[:offset]
-                self._iters[key] = itertools.cycle(shifted)
+                self._iters[key] = self._make_iter(pool)
             return next(self._iters[key])
 
-    def reset(self, phone: str, chat_id: int) -> None:
+    def reset(self, phone: str, chat_id: int, pool: list[str]) -> None:
+        """Force a fresh cycle for this (phone, chat_id) pair."""
+        key = self._key(phone, chat_id)
         with self._lock:
-            self._iters.pop((phone, chat_id), None)
+            self._iters[key] = self._make_iter(pool)
 
     def reset_account(self, phone: str) -> None:
+        """Drop all iterators for a given phone (e.g. after session restart)."""
         with self._lock:
             keys = [k for k in self._iters if k[0] == phone]
             for k in keys:
                 del self._iters[k]
 
 
-# ─── REACTION ENGINE ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  REACTION ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
 
 class ReactionEngine:
     """
-    Priority-aware reaction engine.
+    Priority-queue-based engine that routes incoming reaction jobs to healthy
+    accounts while respecting per-chat config, rate limits, and blacklists.
 
-    Responsibilities
-    ----------------
-    1. Accept jobs via enqueue() — checks blacklist immediately at enqueue time.
-    2. Dispatch jobs from an asyncio.PriorityQueue to worker coroutines.
-    3. Per-job: select healthy accounts, check rate limits, send reaction,
-       record metrics, handle FloodWait / ban errors.
-    4. Expose metrics via self.metrics for external monitoring.
-
-    Parameters
-    ----------
-    accounts        : list of Account objects (from auto_react.py)
-    registry        : ChatConfigRegistry (per-chat config + blacklist)
-    concurrency     : max simultaneous reaction sends across all accounts/chats
-    worker_count    : number of asyncio worker tasks draining the queue
-    flood_backoff   : extra seconds added on top of Telegram's FloodWait
-    max_retries     : per-job retry attempts on transient errors
-    on_sent         : optional async callback(account, chat_id, msg_id, emoji)
-    on_failed       : optional async callback(account, chat_id, msg_id, error)
+    Usage
+    -----
+    engine = ReactionEngine(accounts, registry)
+    asyncio.create_task(engine.run())          # start background workers
+    await engine.enqueue(chat_id, msg_id)      # normal priority
+    await engine.enqueue_urgent(chat_id, msg_id)
+    engine.stop()                              # signal shutdown
     """
 
     def __init__(
         self,
-        accounts:     list[Account],
-        registry:     ChatConfigRegistry,
-        concurrency:  int   = 5,
-        worker_count: int   = 3,
-        flood_backoff: float = 3.0,
-        max_retries:  int   = 2,
-        on_sent:   Optional[Callable[..., Awaitable[None]]] = None,
-        on_failed: Optional[Callable[..., Awaitable[None]]] = None,
+        accounts:       list,                # list[Account]
+        registry:       ChatConfigRegistry,
+        concurrency:    int      = 5,
+        worker_count:   int      = 3,
+        flood_backoff:  float    = 3.0,       # extra wait on FloodWait (multiplier)
+        max_retries:    int      = 2,
+        on_sent:        Optional[Callable]  = None,  # (phone, chat_id, msg_id) → None
+        on_failed:      Optional[Callable]  = None,  # (phone, chat_id, msg_id, exc) → None
     ):
-        self.accounts      = accounts
-        self.registry      = registry
-        self.concurrency   = concurrency
-        self.worker_count  = worker_count
-        self.flood_backoff = flood_backoff
-        self.max_retries   = max_retries
-        self.on_sent       = on_sent
-        self.on_failed     = on_failed
+        self._accounts      = accounts
+        self._registry      = registry
+        self._concurrency   = concurrency
+        self._worker_count  = worker_count
+        self._flood_backoff = flood_backoff
+        self._max_retries   = max_retries
+        self._on_sent       = on_sent
+        self._on_failed     = on_failed
 
-        self._queue:      asyncio.PriorityQueue[PriorityReactionJob] = asyncio.PriorityQueue()
-        self._semaphore:  asyncio.Semaphore = asyncio.Semaphore(concurrency)
-        self._emoji:      EmojiCycler       = EmojiCycler()
-        self.metrics:     EngineMetrics     = EngineMetrics()
-        self._running:    bool              = False
-        self._tasks:      list[asyncio.Task] = []
+        self._queue:   asyncio.PriorityQueue  = asyncio.PriorityQueue()
+        self._sem:     asyncio.Semaphore      = asyncio.Semaphore(concurrency)
+        self._running: bool                   = False
+        self._stop_ev: asyncio.Event          = asyncio.Event()
 
-    # ── public API ───────────────────────────────────────────────────────────
+        self.metrics = EngineMetrics()
+        self.cycler  = EmojiCycler()
+
+        # per-account flood cooldown {phone: resume_at (monotonic)}
+        self._flood_until: dict[str, float] = {}
+        self._flood_lock   = threading.Lock()
+
+    # ── public API ────────────────────────────────────────────────────────────
 
     async def enqueue(
         self,
         chat_id:        int,
         msg_id:         int,
-        priority:       int                    = Priority.NORMAL,
-        account_filter: Optional[set[str]]     = None,
-    ) -> bool:
-        """
-        Add a reaction job to the queue.
-
-        Returns False immediately if chat_id is blacklisted (job is dropped).
-        Applies priority_boost from ChatConfig before inserting.
-        """
-        cfg = self.registry.get(chat_id)
+        priority:       Priority       = Priority.NORMAL,
+        account_filter: Optional[list] = None,
+    ) -> None:
+        # check blacklist early so it never touches the queue
+        self._registry.reload()
+        cfg = self._registry.get(chat_id)
         if cfg.blacklisted:
-            log.debug(f"[engine] blacklisted chat {chat_id} — drop job")
             self.metrics.bump_blacklist_drop()
-            return False
+            logger.debug("[engine] blacklisted chat_id=%s — drop", chat_id)
+            return
 
-        boosted = min(int(Priority.URGENT), priority + cfg.priority_boost)
         job = PriorityReactionJob.make(
             chat_id        = chat_id,
             msg_id         = msg_id,
-            priority       = boosted,
+            priority       = priority,
             account_filter = account_filter,
+            priority_boost = cfg.priority_boost,
         )
         await self._queue.put(job)
         self.metrics.bump_enqueued()
-        log.debug(f"[engine] enqueued job chat={chat_id} msg={msg_id} prio={boosted}")
-        return True
+        logger.debug("[engine] queued chat=%s msg=%s pri=%s depth=%d",
+                     chat_id, msg_id, job.priority.name, self._queue.qsize())
 
-    async def enqueue_urgent(self, chat_id: int, msg_id: int) -> bool:
-        """Shorthand: enqueue at URGENT priority."""
-        return await self.enqueue(chat_id, msg_id, priority=Priority.URGENT)
+    async def enqueue_urgent(self, chat_id: int, msg_id: int) -> None:
+        await self.enqueue(chat_id, msg_id, Priority.URGENT)
 
-    async def run(self) -> None:
-        """
-        Start the engine.  Spawns worker_count worker tasks and runs until
-        the coroutine is cancelled.
-
-        Typical usage:
-          asyncio.create_task(engine.run())
-        """
-        self._running = True
-        self._tasks = [
-            asyncio.create_task(self._worker(worker_id=i))
-            for i in range(self.worker_count)
-        ]
-        log.info(
-            f"[engine] started — {self.worker_count} workers, "
-            f"concurrency={self.concurrency}"
-        )
-        try:
-            await asyncio.gather(*self._tasks)
-        except asyncio.CancelledError:
-            log.info("[engine] cancelled — shutting down workers")
-            for t in self._tasks:
-                t.cancel()
-            raise
-
-    async def stop(self) -> None:
-        """Graceful stop: drain the queue, then cancel workers."""
-        await self._queue.join()
-        for t in self._tasks:
-            t.cancel()
+    def stop(self) -> None:
         self._running = False
-        log.info("[engine] stopped")
+        self._stop_ev.set()
 
     def queue_depth(self) -> int:
         return self._queue.qsize()
 
-    # ── internals ────────────────────────────────────────────────────────────
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        self._running = True
+        self._stop_ev.clear()
+        logger.info("[engine] starting %d workers, concurrency=%d",
+                    self._worker_count, self._concurrency)
+        workers = [
+            asyncio.create_task(self._worker(i))
+            for i in range(self._worker_count)
+        ]
+        await self._stop_ev.wait()
+        for w in workers:
+            w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        self.metrics.log_summary()
+        logger.info("[engine] stopped")
+
+    # ── workers ───────────────────────────────────────────────────────────────
 
     async def _worker(self, worker_id: int) -> None:
-        """Single worker task — pulls jobs and dispatches them."""
-        log.debug(f"[engine] worker-{worker_id} started")
-        while True:
-            job: PriorityReactionJob = await self._queue.get()
+        logger.debug("[worker %d] started", worker_id)
+        while self._running:
             try:
-                async with self._semaphore:
-                    await self._dispatch(job)
-            except Exception as e:
-                log.error(f"[engine] worker-{worker_id} unhandled error: {e}")
-            finally:
-                self._queue.task_done()
+                job: PriorityReactionJob = await asyncio.wait_for(
+                    self._queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            async with self._sem:
+                await self._dispatch(job)
+
+            self._queue.task_done()
 
     async def _dispatch(self, job: PriorityReactionJob) -> None:
-        """
-        Execute one reaction job across all eligible accounts.
-        Each account sends its own reaction; they run concurrently via gather.
-        """
-        cfg   = self.registry.get(job.chat_id)
-        pool  = cfg.effective_emoji_pool()
+        """Select eligible accounts and fire _send_one for each."""
+        cfg      = self._registry.get(job.chat_id)
+        pool     = cfg.effective_emoji_pool()
+        accounts = self._select_accounts(job)
 
-        eligible = [
-            acc for acc in self.accounts
-            if acc.is_healthy()
-            and acc.client is not None
-            and (job.account_filter is None or acc.phone in job.account_filter)
-        ]
-
-        if not eligible:
-            log.warning(
-                f"[engine] no eligible accounts for chat={job.chat_id} "
-                f"msg={job.msg_id}"
-            )
+        if not accounts:
             self.metrics.bump_skipped()
+            logger.debug("[engine] no eligible accounts for chat=%s", job.chat_id)
             return
 
-        # fire all eligible accounts in parallel (semaphore already acquired above)
-        results = await asyncio.gather(
-            *[
-                self._send_one(acc, job, pool, cfg)
-                for acc in eligible
-            ],
-            return_exceptions=True,
-        )
+        tasks = [
+            asyncio.create_task(self._send_one(acc, job, pool, cfg))
+            for acc in accounts
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-        sent = sum(1 for r in results if r is True)
-        log.info(
-            f"[engine] chat={job.chat_id} msg={job.msg_id} "
-            f"sent={sent}/{len(eligible)} prio={job.priority}"
-        )
+    def _select_accounts(self, job: PriorityReactionJob) -> list:
+        """Return healthy accounts that pass the job's optional filter."""
+        candidates = [
+            a for a in self._accounts
+            if a.is_healthy() and (
+                job.account_filter is None or
+                a.phone in job.account_filter
+            )
+        ]
+        return candidates
 
     async def _send_one(
         self,
-        acc:  Account,
+        acc:  object,       # Account
         job:  PriorityReactionJob,
         pool: list[str],
         cfg:  ChatConfig,
-    ) -> bool:
-        """
-        Send a single reaction from one account.
-        Returns True on success, False on skip/failure.
-        """
-        # URGENT priority bypasses rate limiter
-        if job.priority < Priority.URGENT:
-            if not acc.limiter.allowed():
-                wait = acc.limiter.seconds_until_allowed()
-                log.debug(
-                    f"  [{acc.phone}] rate-limited on chat={job.chat_id} "
-                    f"— next in {wait:.0f}s"
-                )
+    ) -> None:
+        # check per-account flood cooldown
+        now = time.monotonic()
+        with self._flood_lock:
+            if now < self._flood_until.get(acc.phone, 0):
                 self.metrics.bump_skipped()
-                return False
+                return
 
-        emoji = self._emoji.next(
-            phone   = acc.phone,
-            chat_id = job.chat_id,
-            pool    = pool,
-        )
+        # apply per-chat rate limits if configured, else use account limiter
+        if cfg.max_per_hour > 0 or cfg.min_gap_sec > 0.0:
+            # build a one-off limiter for this chat
+            max_h = cfg.max_per_hour  if cfg.max_per_hour  > 0 else MAX_REACTIONS_PER_HOUR
+            gap   = cfg.min_gap_sec   if cfg.min_gap_sec   > 0 else MIN_GAP_BETWEEN_REACTIONS
+            lim = RateLimiter(max_h, gap)
+            # copy timestamps from account limiter so we don't double-count
+            if hasattr(acc, 'limiter') and hasattr(acc.limiter, '_timestamps'):
+                lim._timestamps = list(acc.limiter._timestamps)
+            can = lim.can_send()
+        else:
+            # URGENT bypasses rate limiter
+            can = (job.priority == Priority.URGENT) or acc.limiter.can_send()
 
-        t_start = time.monotonic()
-        for attempt in range(1, self.max_retries + 1):
+        if not can:
+            self.metrics.bump_skipped()
+            logger.debug("[engine] rate-limited acc=%s chat=%s",
+                         acc.phone, job.chat_id)
+            return
+
+        # pick emoji
+        emoji = self.cycler.next(acc.phone, job.chat_id, pool)
+
+        # attempt send with retries
+        enqueue_lag = time.monotonic() - job.enqueued_at
+        attempt     = 0
+        sent        = False
+
+        while attempt <= self._max_retries and not sent:
+            attempt += 1
             try:
-                await acc.client(SendReactionRequest(
-                    peer    = job.chat_id,
-                    msg_id  = job.msg_id,
-                    reaction = [ReactionEmoji(emoticon=emoji)],
-                ))
-                latency = time.monotonic() - t_start
-                acc.limiter.record()
-                acc.mark_ok()
-                self.metrics.bump_sent(job.chat_id, acc.phone, latency)
-                log.info(f"  [{acc.phone}] ✓ {emoji} → chat={job.chat_id} "
-                         f"msg={job.msg_id} ({latency*1000:.0f}ms)")
+                ok = await send_reaction(acc, job.chat_id, job.msg_id)
+                if ok:
+                    acc.mark_ok()
+                    if hasattr(acc.limiter, 'mark_sent'):
+                        acc.limiter.mark_sent()
+                    self.metrics.bump_sent(
+                        job.chat_id,
+                        acc.phone,
+                        enqueue_lag + (time.monotonic() - job.enqueued_at - enqueue_lag),
+                    )
+                    if self._on_sent:
+                        try:
+                            self._on_sent(acc.phone, job.chat_id, job.msg_id)
+                        except Exception:
+                            pass
+                    sent = True
+                    logger.debug("[engine] sent  acc=%s chat=%s msg=%s emoji=%s",
+                                 acc.phone, job.chat_id, job.msg_id, emoji)
+                else:
+                    raise RuntimeError("send_reaction returned False")
 
-                if self.on_sent:
-                    try:
-                        await self.on_sent(acc, job.chat_id, job.msg_id, emoji)
-                    except Exception as cb_err:
-                        log.warning(f"  [{acc.phone}] on_sent callback error: {cb_err}")
+            except Exception as exc:
+                name = type(exc).__name__
+                logger.warning("[engine] attempt %d/%d failed acc=%s exc=%s",
+                               attempt, self._max_retries + 1, acc.phone, exc)
 
-                return True
+                # flood wait
+                if "FloodWait" in name or "flood_wait" in name.lower():
+                    wait_secs = getattr(exc, 'seconds', 60) * self._flood_backoff
+                    logger.warning("[engine] FloodWait acc=%s — cooldown %.0fs",
+                                   acc.phone, wait_secs)
+                    with self._flood_lock:
+                        self._flood_until[acc.phone] = time.monotonic() + wait_secs
+                    self.metrics.bump_flooded()
+                    break  # don't retry; job will be re-enqueued on next message
 
-            except FloodWaitError as e:
-                self.metrics.bump_flooded()
-                extra  = random.uniform(1.0, self.flood_backoff)
-                total  = e.seconds + extra
-                log.warning(
-                    f"  [{acc.phone}] FloodWait {e.seconds}s "
-                    f"(+{extra:.1f}s jitter) attempt {attempt}/{self.max_retries}"
-                )
-                if attempt < self.max_retries:
-                    await asyncio.sleep(total)
+                # ban / deactivated
+                if any(x in name for x in ("Deactivated", "Banned", "AuthKey")):
+                    acc.mark_fail()
+                    self.metrics.bump_banned(acc.phone)
+                    self.cycler.reset_account(acc.phone)
+                    logger.error("[engine] BANNED acc=%s — marked unhealthy", acc.phone)
+                    break
+
+                # generic failure — back off between retries
+                if attempt <= self._max_retries:
+                    await asyncio.sleep(random.uniform(0.5, 1.5) * attempt)
                 else:
                     acc.mark_fail()
-                    self.metrics.bump_failed()
-                    if self.on_failed:
+                    self.metrics.bump_failed(job.chat_id, acc.phone)
+                    if self._on_failed:
                         try:
-                            await self.on_failed(acc, job.chat_id, job.msg_id, e)
-                        except Exception: pass
-                    return False
-
-            except UserDeactivatedBanError:
-                log.error(f"  [{acc.phone}] BANNED — marking permanently unhealthy")
-                acc._consecutive_failures = acc.MAX_FAILURES
-                self.metrics.bump_banned()
-                self._emoji.reset_account(acc.phone)
-                if self.on_failed:
-                    try:
-                        await self.on_failed(acc, job.chat_id, job.msg_id,
-                                             UserDeactivatedBanError())
-                    except Exception: pass
-                return False
-
-            except Exception as e:
-                acc.mark_fail()
-                self.metrics.bump_failed()
-                log.warning(
-                    f"  [{acc.phone}] error attempt {attempt}/{self.max_retries}: {e}"
-                )
-                if attempt < self.max_retries:
-                    backoff = 2.0 ** (attempt - 1) + random.uniform(0.5, 2.0)
-                    await asyncio.sleep(backoff)
-                else:
-                    if self.on_failed:
-                        try:
-                            await self.on_failed(acc, job.chat_id, job.msg_id, e)
-                        except Exception: pass
-                    return False
-
-        return False
+                            self._on_failed(acc.phone, job.chat_id, job.msg_id, exc)
+                        except Exception:
+                            pass
 
 
-# ─── QUEUE INSPECTOR ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  QUEUE INSPECTOR  — debug / monitor
+# ══════════════════════════════════════════════════════════════════════════════
 
 class QueueInspector:
     """
-    Read-only view into the engine's state for monitoring/dashboard use.
-    Attach to a running ReactionEngine and poll for stats.
-
-      inspector = QueueInspector(engine)
-      print(inspector.report())
+    Utility to report current engine state.
+    Call print_report() from a monitoring loop or on demand.
     """
 
     def __init__(self, engine: ReactionEngine):
         self._engine = engine
 
     def report(self) -> dict:
-        snap = self._engine.metrics.snapshot()
-        snap["queue_depth"]   = self._engine.queue_depth()
-        snap["worker_count"]  = self._engine.worker_count
-        snap["concurrency"]   = self._engine.concurrency
-        return snap
+        m = self._engine.metrics.snapshot()
+        return {
+            "queue_depth":     self._engine.queue_depth(),
+            "running":         self._engine._running,
+            **m,
+        }
 
     def print_report(self) -> None:
-        r = self.report()
-        print("\n── Reaction Engine Status ──────────────────────")
-        print(f"  queue depth   : {r['queue_depth']}")
-        print(f"  workers       : {r['worker_count']}  concurrency={r['concurrency']}")
-        print(f"  enqueued      : {r['total_enqueued']}")
-        print(f"  sent          : {r['total_sent']}")
-        print(f"  skipped       : {r['total_skipped']}")
-        print(f"  failed        : {r['total_failed']}")
-        print(f"  flood events  : {r['total_flooded']}")
-        print(f"  bans          : {r['total_banned']}")
-        print(f"  bl drops      : {r['blacklist_drops']}")
-        print(f"  latency P50   : {r['latency_p50_ms']} ms")
-        print(f"  latency P95   : {r['latency_p95_ms']} ms")
-        if r["per_account"]:
-            print("  per account :")
-            for phone, cnt in sorted(r["per_account"].items()):
-                bar = "█" * min(cnt, 30)
-                print(f"    {phone:<18} {cnt:>5}  {bar}")
-        print("────────────────────────────────────────────────\n")
+        r   = self.report()
+        sep = "─" * 52
+        print(sep)
+        print("  Reaction Engine — Status Report")
+        print(sep)
+        print(f"  Running:      {r['running']}")
+        print(f"  Queue depth:  {r['queue_depth']}")
+        print(f"  Enqueued:     {r['total_enqueued']}")
+        print(f"  Sent:         {r['total_sent']}")
+        print(f"  Skipped:      {r['total_skipped']}")
+        print(f"  Failed:       {r['total_failed']}")
+        print(f"  Flooded:      {r['total_flooded']}")
+        print(f"  Banned:       {r['total_banned']}")
+        print(f"  Blk drops:    {r['blacklist_drops']}")
+        print(f"  P50 latency:  {r['latency_p50']:.2f}s")
+        print(f"  P95 latency:  {r['latency_p95']:.2f}s")
+        if r["top_chats"]:
+            print("  Top chats:")
+            for cid, stats in r["top_chats"][:5]:
+                print(f"    {cid}: sent={stats['sent']} failed={stats['failed']}")
+        if r["top_accounts"]:
+            print("  Accounts:")
+            for phone, stats in r["top_accounts"]:
+                print(f"    {phone}: sent={stats['sent']} failed={stats['failed']}")
+        print(sep)
