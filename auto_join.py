@@ -169,21 +169,63 @@ DRY_RUN             = False  # True → simulate everything, never call JoinChan
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# tolerant column aliases + delimiter sniffing (reads any delimited text file)
+_COL_ALIASES = {
+    "phone":   ("phone", "phone_number", "number", "msisdn", "tel", "telephone"),
+    "session": ("session_name", "session", "session_file", "name"),
+    "p_type":  ("proxy_type", "proxytype"),
+    "p_host":  ("proxy_host", "proxyhost", "proxy_ip"),
+    "p_port":  ("proxy_port", "proxyport"),
+    "p_user":  ("proxy_user", "proxyuser", "proxy_username"),
+    "p_pass":  ("proxy_pass", "proxypass", "proxy_password"),
+}
+
+
+def _col(row: dict, keys) -> str:
+    for k in keys:
+        if k in row and str(row[k]).strip():
+            return str(row[k]).strip()
+    return ""
+
+
+def _derive_session(phone: str) -> str:
+    import re
+    return "session_" + re.sub(r"[^0-9A-Za-z]", "", phone)
+
+
 def _load_accounts_from_file(path: str) -> list[Account]:
-    """Read one CSV file and return a list of Account objects."""
+    """
+    Read one delimited text file (comma/semicolon/tab/pipe) and return Accounts.
+    Column names are matched tolerantly; a missing session name is derived from
+    the phone. Only `phone` is required. Non-tabular files yield no rows.
+    """
     accounts = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+    with open(path, newline="", encoding="utf-8-sig", errors="ignore") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            delim = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+        except Exception:
+            delim = ","
+        reader = csv.DictReader(f, delimiter=delim)
+        if not reader.fieldnames:
+            return accounts
+        for raw in reader:
+            row = {(k or "").strip().lower(): v for k, v in raw.items()}
+            phone = _col(row, _COL_ALIASES["phone"])
+            if not phone:
+                continue
+            port_s = _col(row, _COL_ALIASES["p_port"])
             proxy = ProxyConfig(
-                proxy_type = row.get("proxy_type", "").strip(),
-                host       = row.get("proxy_host", "").strip(),
-                port       = int(row["proxy_port"]) if row.get("proxy_port", "").strip() else 0,
-                username   = row.get("proxy_user", "").strip(),
-                password   = row.get("proxy_pass", "").strip(),
+                proxy_type = _col(row, _COL_ALIASES["p_type"]),
+                host       = _col(row, _COL_ALIASES["p_host"]),
+                port       = int(port_s) if port_s.isdigit() else 0,
+                username   = _col(row, _COL_ALIASES["p_user"]),
+                password   = _col(row, _COL_ALIASES["p_pass"]),
             )
             accounts.append(Account(
-                phone   = row["phone"].strip(),
-                session = row["session_name"].strip(),
+                phone   = phone,
+                session = _col(row, _COL_ALIASES["session"]) or _derive_session(phone),
                 proxy   = proxy,
                 limiter = RateLimiter(MAX_JOINS_PER_HOUR, MIN_JOIN_GAP_SEC),
             ))
@@ -213,11 +255,16 @@ def load_accounts(folder: str = ACCOUNTS_CSV_DIR) -> list[Account]:
             f"Create the folder and place your .csv account files inside it."
         )
 
-    csv_files = sorted(glob.glob(os.path.join(folder_path, "*.csv")))
+    # read EVERY file in the folder (any extension), not just *.csv;
+    # sub-directories are skipped, unparseable files are ignored below.
+    csv_files = sorted(
+        p for p in glob.glob(os.path.join(folder_path, "*"))
+        if os.path.isfile(p)
+    )
     if not csv_files:
         raise FileNotFoundError(
-            f"[load_accounts] No .csv files found in: {folder_path!r}\n"
-            f"Drop at least one account CSV file into that folder."
+            f"[load_accounts] No files found in: {folder_path!r}\n"
+            f"Drop at least one account file (.csv/.txt/...) into that folder."
         )
 
     all_accounts: list[Account] = []

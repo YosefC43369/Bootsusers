@@ -272,10 +272,12 @@ def load_accounts(folder: str = ACCOUNTS_DIR) -> "list[Account]":
             f"Create the folder and place your .csv files (with id/email/phone) inside it."
         )
 
-    files = sorted(glob.glob(os.path.join(folder_path, "*.csv")))
+    # read EVERY file in the folder (any extension), not just *.csv
+    files = sorted(p for p in glob.glob(os.path.join(folder_path, "*"))
+                   if os.path.isfile(p))
     if not files:
         raise FileNotFoundError(
-            f"[load_accounts] no .csv files found in: {folder_path!r}\n"
+            f"[load_accounts] no files found in: {folder_path!r}\n"
             f"Drop at least one account file into that folder."
         )
 
