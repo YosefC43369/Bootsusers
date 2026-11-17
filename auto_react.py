@@ -156,6 +156,22 @@ class Account:
         self._consecutive_failures += 1
 
 
+def _raise_csv_field_limit() -> None:
+    """Allow very large CSV fields (big account dumps), capped at the largest
+    C-long the platform accepts (avoids OverflowError on Windows)."""
+    import sys
+    lim = sys.maxsize
+    while lim > 1:
+        try:
+            csv.field_size_limit(lim)
+            return
+        except OverflowError:
+            lim //= 10
+
+
+_raise_csv_field_limit()
+
+
 # tolerant column aliases + delimiter sniffing (reads any delimited text file)
 _COL_ALIASES = {
     "phone":   ("phone", "phone_number", "number", "msisdn", "tel", "telephone"),

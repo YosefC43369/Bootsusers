@@ -98,6 +98,21 @@ except Exception:  # pragma: no cover
     async def resolve_channel_entity(client, channel):
         return await client.get_input_entity(channel)
 
+
+def _raise_csv_field_limit() -> None:
+    """Allow very large CSV fields (big account dumps / long rows), capped at
+    the largest C-long the platform accepts (avoids OverflowError on Windows)."""
+    lim = sys.maxsize
+    while lim > 1:
+        try:
+            csv.field_size_limit(lim)
+            return
+        except OverflowError:
+            lim //= 10
+
+
+_raise_csv_field_limit()
+
 # ==============================================================================
 #  GLOBAL CONFIG
 # ==============================================================================
