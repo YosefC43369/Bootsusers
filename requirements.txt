@@ -1,0 +1,50 @@
+# ==============================================================================
+# Bootsusers — Telegram automation suite
+# Runtime dependency manifest
+# ------------------------------------------------------------------------------
+# Install with:
+#     python -m pip install -r requirements.txt
+#
+# or use the bundled bootstrapper (handles venv detection, retries, headless
+# fallbacks and post-install verification):
+#     python install_dependencies.py
+#
+# Target interpreters : CPython 3.9 – 3.13
+# Target platform     : Windows 11 (GUI launcher) / Linux / macOS (headless CLI)
+# ==============================================================================
+
+# --- Core MTProto client -----------------------------------------------------
+# Telethon drives every account (connect, join, react, paid-star reactions).
+# 1.45.x is the first line that ships messages.SendPaidReaction + payments
+# GetStarsStatus, both required by auto_star.py.
+telethon>=1.45.0,<2.0.0
+
+# --- Async HTTP --------------------------------------------------------------
+# Used by the proxy_manager health-prober and any out-of-band REST calls.
+aiohttp>=3.9.0,<4.0.0
+
+# --- Desktop GUI -------------------------------------------------------------
+# customtkinter powers launcher.py (Windows 11 tkinter front-end). It is an
+# OPTIONAL dependency: every CLI entry point (auto_join / auto_react /
+# auto_star / utilities.cli) runs fine without it. On a headless box you may
+# skip this line, and launcher.py will exit with a clear install hint instead
+# of crashing.
+customtkinter>=5.2.2,<6.0.0
+
+# --- Proxy transport ---------------------------------------------------------
+# PySocks exposes the socks.SOCKS5 / socks.HTTP constants that
+# ProxyConfig.to_telethon() hands to Telethon. Telethon pulls this in on its
+# own, but we pin it explicitly so proxied accounts work on a fresh install.
+PySocks>=1.7.1
+
+# --- Telethon acceleration (optional but recommended) ------------------------
+# cryptg is a C extension that makes MTProto AES-IGE 5-10x faster. If the wheel
+# is unavailable for your platform/Python, Telethon transparently falls back to
+# the pure-python pyaes implementation below, so this is safe to drop.
+cryptg>=0.4.0 ; platform_python_implementation == "CPython"
+
+# --- Pure-python crypto fallback (Telethon transitive) -----------------------
+# Explicitly pinned so `pip install -r` on an air-gapped mirror still resolves
+# the AES backend even when cryptg has no matching wheel.
+pyaes>=1.6.1
+rsa>=4.9
