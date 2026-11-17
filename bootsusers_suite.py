@@ -91,6 +91,13 @@ try:
 except Exception:  # pragma: no cover - keeps the core 4 ops working standalone
     _ADVANCED = False
 
+# shared channel resolver — lets every op accept a private invite link too
+try:
+    from tg_resolve import resolve_channel_entity
+except Exception:  # pragma: no cover
+    async def resolve_channel_entity(client, channel):
+        return await client.get_input_entity(channel)
+
 # ==============================================================================
 #  GLOBAL CONFIG
 # ==============================================================================
@@ -480,7 +487,7 @@ async def op_react(accounts: "list[Account]", channel: str, message: str, emoji:
     if not pool:
         log_fn(LEVEL_ERR, "no connected account")
         return stats
-    channel_ent = await pool[0].client.get_input_entity(channel)
+    channel_ent = await resolve_channel_entity(pool[0].client, channel)
     ids = await resolve_message_ids(pool[0].client, channel_ent, message)
     log_fn(LEVEL_ACCENT, f"REACT {emoji} → {channel} msgs {ids}")
     for mid in ids:
@@ -523,7 +530,7 @@ async def op_star(accounts: "list[Account]", channel: str, message: str, stars: 
     if not pool:
         log_fn(LEVEL_ERR, "no connected account")
         return stats
-    channel_ent = await pool[0].client.get_input_entity(channel)
+    channel_ent = await resolve_channel_entity(pool[0].client, channel)
     ids = await resolve_message_ids(pool[0].client, channel_ent, message)
     privacy = PaidReactionPrivacyAnonymous() if anonymous else PaidReactionPrivacyDefault()
     log_fn(LEVEL_ACCENT, f"STARS ×{stars} → {channel} msgs {ids}")
@@ -592,7 +599,7 @@ async def op_views(accounts: "list[Account]", channel: str, message: str, target
     if not pool:
         log_fn(LEVEL_ERR, "no connected account")
         return stats
-    channel_ent = await pool[0].client.get_input_entity(channel)
+    channel_ent = await resolve_channel_entity(pool[0].client, channel)
     ids = await resolve_message_ids(pool[0].client, channel_ent, message)
     before = await read_view_counts(pool[0].client, channel_ent, ids)
 

@@ -52,6 +52,11 @@ from telethon.errors import (
 )
 from telethon.tl.functions.messages import SendPaidReactionRequest
 from telethon.tl.functions.payments import GetStarsStatusRequest
+try:
+    from tg_resolve import resolve_channel_entity
+except Exception:
+    async def resolve_channel_entity(client, channel):
+        return await client.get_input_entity(channel)
 from telethon.tl.types import (
     InputPeerSelf,
     PaidReactionPrivacyAnonymous,
@@ -552,7 +557,7 @@ async def run_campaign(
     if resolver is None:
         raise RuntimeError("no connected account available to resolve the target")
 
-    channel = await resolver.client.get_input_entity(channel_spec)
+    channel = await resolve_channel_entity(resolver.client, channel_spec)
     msg_ids = await resolve_message_ids(resolver.client, channel, message_spec)
     log.info("target channel resolved; message ids: %s", msg_ids)
 

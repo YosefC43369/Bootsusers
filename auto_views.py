@@ -59,6 +59,11 @@ from telethon.errors import (
     UserDeactivatedBanError,
 )
 from telethon.tl.functions.messages import GetMessagesViewsRequest
+try:
+    from tg_resolve import resolve_channel_entity
+except Exception:
+    async def resolve_channel_entity(client, channel):
+        return await client.get_input_entity(channel)
 
 # ─── CONFIG (defaults; overridable on the command line) ───────────────────────
 
@@ -464,7 +469,7 @@ async def run_views(
         raise RuntimeError("no connected account available")
 
     resolver = live[0].client
-    channel = await resolver.get_input_entity(channel_spec)
+    channel = await resolve_channel_entity(resolver, channel_spec)
     msg_ids = await resolve_message_ids(resolver, channel, message_spec)
     log.info("target resolved; message ids: %s", msg_ids)
 

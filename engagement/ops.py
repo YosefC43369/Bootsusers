@@ -29,6 +29,12 @@ from telethon.tl.functions.stories import (
 )
 from telethon.tl.types import InputPeerSelf, ReactionEmoji
 
+try:
+    from tg_resolve import resolve_channel_entity
+except Exception:  # pragma: no cover
+    async def resolve_channel_entity(client, channel):
+        return await client.get_input_entity(channel)
+
 LogFn = Callable[[str, str], None]
 StopFn = Callable[[], bool]
 FLOOD_MAX_WAIT_SEC = 300
@@ -51,7 +57,7 @@ async def op_vote(accounts, channel: str, message: str, *,
     if not pool:
         log_fn("err", "no connected account")
         return stats
-    chan = await pool[0].client.get_input_entity(channel)
+    chan = await resolve_channel_entity(pool[0].client, channel)
     mid = int(message) if str(message).isdigit() else None
     if mid is None:
         log_fn("err", "vote needs a numeric message id")
@@ -114,7 +120,7 @@ async def op_forward(accounts, channel: str, message: str, *,
     if not pool:
         log_fn("err", "no connected account")
         return stats
-    src = await pool[0].client.get_input_entity(channel)
+    src = await resolve_channel_entity(pool[0].client, channel)
     ids = [int(x) for x in str(message).split(",") if x.strip().isdigit()]
     if not ids:
         log_fn("err", "forward needs numeric message id(s)")
@@ -221,7 +227,7 @@ async def op_story(accounts, channel: str, *,
     if not pool:
         log_fn("err", "no connected account")
         return stats
-    peer = await pool[0].client.get_input_entity(channel)
+    peer = await resolve_channel_entity(pool[0].client, channel)
     try:
         res = await pool[0].client(GetPeerStoriesRequest(peer=peer))
         stories = list(getattr(res.stories, "stories", []))
@@ -243,7 +249,7 @@ async def op_story(accounts, channel: str, *,
             stats["dry"] += 1
             continue
         try:
-            peer_a = await acc.client.get_input_entity(channel)
+            peer_a = await resolve_channel_entity(acc.client, channel)
             await acc.client(ReadStoriesRequest(peer=peer_a, max_id=max_id))
             acc.mark_ok(); stats["story_viewed"] += 1
             if react_emoji:
