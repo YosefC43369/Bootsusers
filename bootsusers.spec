@@ -32,6 +32,11 @@ datas += collect_data_files("customtkinter")       # ctk themes/assets
 hiddenimports = []
 hiddenimports += collect_submodules("telethon")     # tl.* request/type classes
 hiddenimports += ["socks", "customtkinter"]
+# the suite's advanced ops are imported in a guarded try/except, which the
+# analyzer may not follow — pull the whole feature set in explicitly so the
+# all-in-one GUI has every operation inside the one .exe.
+for _pkg in ("orchestration", "lifecycle", "engagement", "reactive", "growth"):
+    hiddenimports += collect_submodules(_pkg)
 
 a = Analysis(
     ["bootsusers_suite.py"],

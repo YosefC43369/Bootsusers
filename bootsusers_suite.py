@@ -79,6 +79,18 @@ from telethon.tl.types import (
     PaidReactionPrivacyDefault,
 )
 
+# --- advanced operations (engagement / growth / lifecycle / state) -----------
+# Bundled into the .exe; guarded so the core GUI still runs if a package is
+# missing when run from source.
+try:
+    from engagement.ops import op_vote, op_forward, op_comment, op_story
+    from growth import op_scrape, op_invite, op_dm, op_dripjoin, load_members
+    from lifecycle.warmup import warmup_pool, WarmupConfig
+    from orchestration import StateStore
+    _ADVANCED = True
+except Exception:  # pragma: no cover - keeps the core 4 ops working standalone
+    _ADVANCED = False
+
 # ==============================================================================
 #  GLOBAL CONFIG
 # ==============================================================================
@@ -763,6 +775,7 @@ class SuiteState:
     with_stars: int = 0
     busy_op: Optional[str] = None            # which operation is running
     stop_flags: dict = field(default_factory=dict)   # op -> threading.Event
+    store: object = None                     # optional StateStore (persistence)
 
 
 # ==============================================================================
@@ -783,6 +796,11 @@ def run_gui() -> int:
     runner.start()
     bridge = LogBridge()
     state = SuiteState()
+    if _ADVANCED:
+        try:
+            state.store = StateStore("data/bootsusers.db")
+        except Exception:
+            state.store = None
 
     def gui_log(level: str, text: str) -> None:
         bridge.push(level, text)
@@ -1086,12 +1104,173 @@ def run_gui() -> int:
                            log_fn=gui_log, should_stop=should_stop, dry_run=bool(dry.get()))
         add_controls(body, "views", coro)
 
+    # ---- VOTE panel ----
+    def build_vote(body):
+        ch = make_field(body, "CHANNEL", "@your_channel", row=0)
+        msg = make_field(body, "MESSAGE ID (the poll)", "1234", row=2, width=200)
+        idx = make_field(body, "OPTION INDEX  (0 = first choice)", "0", row=4, width=160)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=6, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            oi = int(idx.get()) if idx.get().strip().lstrip("-").isdigit() else 0
+            await op_vote(state.accounts, ch.get().strip(), msg.get().strip(),
+                          option_index=oi, log_fn=gui_log, should_stop=should_stop,
+                          dry_run=bool(dry.get()))
+        add_controls(body, "vote", coro)
+
+    # ---- FORWARD panel ----
+    def build_forward(body):
+        ch = make_field(body, "SOURCE CHANNEL", "@your_channel", row=0)
+        msg = make_field(body, "MESSAGE ID(s)  (id or id,list)", "1234", row=2)
+        to = make_field(body, "FORWARD TO  ('me' = Saved Messages)", "me", row=4, width=220)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=6, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            await op_forward(state.accounts, ch.get().strip(), msg.get().strip(),
+                             to=to.get().strip() or "me", log_fn=gui_log,
+                             should_stop=should_stop, dry_run=bool(dry.get()))
+        add_controls(body, "forward", coro)
+
+    # ---- COMMENT panel ----
+    def build_comment(body):
+        ch = make_field(body, "CHANNEL  (must have a discussion group)", "@your_channel", row=0)
+        msg = make_field(body, "MESSAGE ID", "1234", row=2, width=200)
+        txt = make_field(body, "COMMENT TEXT(s)  (separate with | )", "nice|🔥|great post", row=4, width=420)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=6, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            texts = [t for t in txt.get().split("|") if t.strip()] or ["nice"]
+            await op_comment(state.accounts, ch.get().strip(), msg.get().strip(),
+                             texts, log_fn=gui_log, should_stop=should_stop,
+                             dry_run=bool(dry.get()))
+        add_controls(body, "comment", coro)
+
+    # ---- STORY panel ----
+    def build_story(body):
+        ch = make_field(body, "CHANNEL / USER (with active stories)", "@your_channel", row=0)
+        emo = make_field(body, "REACT EMOJI  (blank = views only)", "🔥", row=2, width=140)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=4, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            await op_story(state.accounts, ch.get().strip(),
+                           react_emoji=emo.get().strip(), log_fn=gui_log,
+                           should_stop=should_stop, dry_run=bool(dry.get()))
+        add_controls(body, "story", coro)
+
+    # ---- SCRAPE panel ----
+    def build_scrape(body):
+        src = make_field(body, "SOURCE GROUP / CHANNEL", "@source_group", row=0)
+        out = make_field(body, "SAVE TO FILE", "data/members.json", row=2, width=320)
+        lim = make_field(body, "MAX MEMBERS  (0 = all)", "0", row=4, width=160)
+        agg = ctk.CTkCheckBox(body, text="aggressive (deeper scrape)", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        agg.grid(row=6, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            limit = int(lim.get()) if lim.get().strip().isdigit() else 0
+            await op_scrape(state.accounts, src.get().strip(), out.get().strip(),
+                            limit=limit, aggressive=bool(agg.get()),
+                            log_fn=gui_log, should_stop=should_stop)
+        add_controls(body, "scrape", coro)
+
+    # ---- INVITE panel ----
+    def build_invite(body):
+        tgt = make_field(body, "TARGET CHANNEL (yours)", "@my_channel", row=0)
+        mf = make_field(body, "MEMBERS FILE", "data/members.json", row=2, width=320)
+        per = make_field(body, "INVITES PER ACCOUNT", "20", row=4, width=160)
+        bat = make_field(body, "BATCH SIZE", "3", row=6, width=120)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=8, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            members = load_members(mf.get().strip())
+            pa = int(per.get()) if per.get().strip().isdigit() else 20
+            bs = int(bat.get()) if bat.get().strip().isdigit() else 3
+            await op_invite(state.accounts, tgt.get().strip(), members,
+                            per_account=pa, batch=bs, log_fn=gui_log,
+                            should_stop=should_stop, store=state.store,
+                            dry_run=bool(dry.get()))
+        add_controls(body, "invite", coro)
+
+    # ---- DM panel ----
+    def build_dm(body):
+        mf = make_field(body, "MEMBERS FILE", "data/members.json", row=0, width=320)
+        tmpl = make_field(body, "MESSAGE  ({Hi|Hey} {first_name})",
+                          "{Hi|Hey} {first_name}, check @my_channel", row=2, width=440)
+        per = make_field(body, "DMs PER ACCOUNT", "15", row=4, width=160)
+        typ = ctk.CTkCheckBox(body, text="simulate typing", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        typ.select()
+        typ.grid(row=6, column=0, sticky="w", padx=6, pady=(8, 2))
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=7, column=0, sticky="w", padx=6, pady=(2, 8))
+
+        async def coro(should_stop):
+            members = load_members(mf.get().strip())
+            pa = int(per.get()) if per.get().strip().isdigit() else 15
+            await op_dm(state.accounts, members, [tmpl.get()], per_account=pa,
+                        simulate_typing=bool(typ.get()), log_fn=gui_log,
+                        should_stop=should_stop, store=state.store,
+                        dry_run=bool(dry.get()))
+        add_controls(body, "dm", coro)
+
+    # ---- DRIP-JOIN panel ----
+    def build_dripjoin(body):
+        ch = make_field(body, "CHANNEL / INVITE", "@your_channel", row=0)
+        wv = make_field(body, "ACCOUNTS PER WAVE", "3", row=2, width=160)
+        dry = ctk.CTkCheckBox(body, text="dry-run", font=font(12),
+                              fg_color=THEME["accent"], text_color=THEME["text"])
+        dry.grid(row=4, column=0, sticky="w", padx=6, pady=8)
+
+        async def coro(should_stop):
+            ws = int(wv.get()) if wv.get().strip().isdigit() else 3
+            await op_dripjoin(state.accounts, ch.get().strip(), wave_size=ws,
+                              log_fn=gui_log, should_stop=should_stop,
+                              dry_run=bool(dry.get()))
+        add_controls(body, "dripjoin", coro)
+
+    # ---- WARMUP panel ----
+    def build_warmup(body):
+        ctk.CTkLabel(body, text="Gradually ages fresh accounts: sets a profile, "
+                     "idle-joins public channels, reads and lightly reacts.\n"
+                     "Run it on several sessions over days until accounts graduate.",
+                     font=font(12), text_color=THEME["text_dim"], justify="left"
+                     ).grid(row=0, column=0, sticky="w", padx=6, pady=(4, 10))
+        av = make_field(body, "AVATAR FOLDER  (optional)", "", row=1, width=320)
+
+        async def coro(should_stop):
+            cfg = WarmupConfig(avatar_dir=av.get().strip() or None)
+            await warmup_pool(state.accounts, state.store, cfg, gui_log, should_stop)
+        add_controls(body, "warmup", coro)
+
     panels = {
         "JOIN":  build_op_panel("⟳ JOIN", "mass-join channels & private invite links", build_join),
         "REACT": build_op_panel("♥ REACT", "emoji reactions from the account pool", build_react),
         "STARS": build_op_panel("★ STARS", "paid star reactions (Telegram Stars)", build_star),
         "VIEWS": build_op_panel("◉ VIEWS", "boost channel message view counts", build_views),
     }
+    if _ADVANCED:
+        panels.update({
+            "VOTE":    build_op_panel("▤ VOTE", "cast votes on a channel poll", build_vote),
+            "FORWARD": build_op_panel("➦ FORWARD", "forward/share a post to inflate shares", build_forward),
+            "COMMENT": build_op_panel("💬 COMMENT", "comment into the linked discussion group", build_comment),
+            "STORY":   build_op_panel("◈ STORY", "register story views + reactions", build_story),
+            "SCRAPE":  build_op_panel("⛏ SCRAPE", "harvest a source group's members", build_scrape),
+            "INVITE":  build_op_panel("➜ INVITE", "invite scraped members into your channel", build_invite),
+            "DM":      build_op_panel("✉ DM", "templated mass direct messages", build_dm),
+            "DRIP":    build_op_panel("⇣ DRIP-JOIN", "join in small waves (stealthier)", build_dripjoin),
+            "WARMUP":  build_op_panel("♨ WARM-UP", "age fresh accounts before use", build_warmup),
+        })
 
     current_panel = {"name": None}
 
@@ -1104,26 +1283,38 @@ def run_gui() -> int:
             b.configure(fg_color=THEME["accent_lo"] if n == name else "transparent",
                         text_color=THEME["accent"] if n == name else THEME["text"])
 
-    # ── sidebar nav buttons ──────────────────────────────────────────────────
-    ctk.CTkLabel(sidebar, text="OPERATIONS", font=font(11, "bold"),
-                 text_color=THEME["text_dim"]).pack(anchor="w", padx=22, pady=(22, 6))
+    # ── sidebar nav buttons (grouped, scrollable) ────────────────────────────
     nav_buttons: dict = {}
-    for name, icon in (("JOIN", "⟳"), ("REACT", "♥"), ("STARS", "★"), ("VIEWS", "◉")):
-        b = ctk.CTkButton(sidebar, text=f"  {icon}  {name}", anchor="w",
-                          font=font(14, "bold"), corner_radius=8, height=42,
-                          fg_color="transparent", hover_color=THEME["card_hi"],
-                          text_color=THEME["text"],
-                          command=lambda n=name: show_panel(n))
-        b.pack(fill="x", padx=12, pady=3)
-        nav_buttons[name] = b
+    nav_scroll = ctk.CTkScrollableFrame(sidebar, fg_color=THEME["panel"],
+                                        corner_radius=0, width=190)
+    nav_scroll.pack(fill="both", expand=True, padx=0, pady=(14, 0))
 
-    ctk.CTkFrame(sidebar, fg_color=THEME["border"], height=1).pack(fill="x", padx=16, pady=14)
-    ctk.CTkLabel(sidebar, text="font: " + FONT, font=font(10),
-                 text_color=THEME["text_dim"]).pack(anchor="w", padx=22, pady=(4, 0))
-    ctk.CTkLabel(sidebar, text="theme: green//matrix", font=font(10),
-                 text_color=THEME["text_dim"]).pack(anchor="w", padx=22, pady=2)
-    ctk.CTkLabel(sidebar, text="v2.0 · single-file", font=font(10),
-                 text_color=THEME["accent"]).pack(side="bottom", anchor="w", padx=22, pady=16)
+    def _nav_group(title, items):
+        ctk.CTkLabel(nav_scroll, text=title, font=font(10, "bold"),
+                     text_color=THEME["text_dim"]).pack(anchor="w", padx=14, pady=(12, 2))
+        for name, icon in items:
+            if name not in panels:
+                continue
+            b = ctk.CTkButton(nav_scroll, text=f"  {icon}  {name}", anchor="w",
+                              font=font(13, "bold"), corner_radius=8, height=34,
+                              fg_color="transparent", hover_color=THEME["card_hi"],
+                              text_color=THEME["text"],
+                              command=lambda n=name: show_panel(n))
+            b.pack(fill="x", padx=10, pady=2)
+            nav_buttons[name] = b
+
+    _nav_group("CORE", [("JOIN", "⟳"), ("REACT", "♥"), ("STARS", "★"), ("VIEWS", "◉")])
+    if _ADVANCED:
+        _nav_group("ENGAGE", [("VOTE", "▤"), ("FORWARD", "➦"),
+                              ("COMMENT", "💬"), ("STORY", "◈")])
+        _nav_group("GROWTH", [("SCRAPE", "⛏"), ("INVITE", "➜"),
+                              ("DM", "✉"), ("DRIP", "⇣")])
+        _nav_group("LIFECYCLE", [("WARMUP", "♨")])
+
+    ctk.CTkLabel(sidebar, text="theme: green//matrix · font: " + FONT, font=font(9),
+                 text_color=THEME["text_dim"]).pack(anchor="w", padx=14, pady=(6, 0))
+    ctk.CTkLabel(sidebar, text="v2.1 · all-in-one", font=font(9),
+                 text_color=THEME["accent"]).pack(anchor="w", padx=14, pady=(0, 10))
 
     # ── boot ────────────────────────────────────────────────────────────────
     for line in BANNER.strip("\n").splitlines():
