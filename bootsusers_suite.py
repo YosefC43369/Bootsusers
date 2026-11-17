@@ -326,10 +326,11 @@ def load_accounts(folder: str = DEFAULT_ACCOUNTS_DIR, log_fn: LogFn = None) -> "
             _say(LEVEL_WARN, f"skipping {os.path.basename(path)} — {exc}")
             continue
         for acc in batch:
-            if acc.phone in seen:
+            key = acc.phone or acc.session
+            if key in seen:
                 dupes += 1
                 continue
-            seen.add(acc.phone)
+            seen.add(key)
             merged.append(acc)
         _say(LEVEL_INFO, f"{os.path.basename(path)} → {len(batch)} (total {len(merged)})")
     if dupes:

@@ -280,10 +280,11 @@ def load_accounts(folder: str = ACCOUNTS_CSV_DIR) -> list[Account]:
             continue
 
         for acc in batch:
-            if acc.phone in seen_phones:
+            key = acc.phone or acc.session
+            if key in seen_phones:
                 total_dupes += 1
                 continue
-            seen_phones.add(acc.phone)
+            seen_phones.add(key)
             all_accounts.append(acc)
 
         logging.info(

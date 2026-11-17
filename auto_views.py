@@ -303,10 +303,11 @@ def load_accounts(folder: str = ACCOUNTS_DIR) -> "list[Account]":
             log.warning("[load_accounts] skipping %s — %s", path, exc)
             continue
         for acc in batch:
-            if acc.phone in seen:
+            key = acc.phone or acc.session
+            if key in seen:
                 dupes += 1
                 continue
-            seen.add(acc.phone)
+            seen.add(key)
             merged.append(acc)
         log.info("[load_accounts] %s → %d (cumulative %d)",
                  os.path.basename(path), len(batch), len(merged))
