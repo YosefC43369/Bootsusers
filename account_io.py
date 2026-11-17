@@ -44,7 +44,8 @@ _PROXY_KW    = {"socks5", "socks4", "http", "https", "mtproto"}
 # header aliases (used as a strong hint when a real header is present)
 _ALIASES = {
     "phone":      ("phone", "phone_number", "number", "msisdn", "tel", "telephone"),
-    "session":    ("session_name", "session", "session_file", "name"),
+    "session":    ("session_name", "session", "session_file", "name",
+                   "session_string", "string_session", "stringsession"),
     "user_id":    ("id", "user_id", "uid", "tg_id", "telegram_id", "account_id"),
     "username":   ("username", "user_name", "handle", "login"),
     "email":      ("email", "mail", "email_address", "e-mail"),
@@ -294,3 +295,77 @@ def read_rows(path: str) -> "list[dict]":
                 rec["phone"] or rec["user_id"] or rec["username"])
         out.append(rec)
     return out
+
+
+# ------------------------------------------------------------------------------
+#  Session pools: bare .session files and JSON exports
+# ------------------------------------------------------------------------------
+
+def _pick_json(d: dict, keys) -> str:
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return str(d[k]).strip()
+    return ""
+
+
+def _read_session_file(path: str) -> "list[dict]":
+    """A Telethon .session file becomes one account; Telethon opens it by the
+    path with the extension stripped. Phone is taken from the filename digits."""
+    import os
+    stem = os.path.splitext(path)[0]
+    name = os.path.basename(stem)
+    digits = re.sub(r"[^0-9]", "", name)
+    rec = _empty_row()
+    rec["session"] = os.path.abspath(stem)           # <stem>.session on disk
+    if 7 <= len(digits) <= 15:
+        rec["phone"] = name if name.startswith("+") else "+" + digits
+    elif _USERNAME_RE.match(name):
+        rec["username"] = name.lstrip("@")
+    return [rec]
+
+
+def _read_json(path: str) -> "list[dict]":
+    """Per-account JSON exports: a single object or a list of them.
+    Recognised keys (any case): phone, session/session_string/string_session,
+    api_id/app_id, api_hash/app_hash, id/user_id, username, email."""
+    import json
+    try:
+        with open(path, encoding="utf-8-sig", errors="ignore") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    items = data if isinstance(data, list) else [data]
+    out: "list[dict]" = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        low = {str(k).strip().lower(): v for k, v in it.items()}
+        rec = _empty_row()
+        for field, aliases in _ALIASES.items():
+            v = _pick_json(low, aliases)
+            if v:
+                rec[field] = v
+        if not _usable(rec):
+            continue
+        if not rec["session"]:
+            rec["session"] = derive_session(
+                rec["phone"] or rec["user_id"] or rec["username"])
+        out.append(rec)
+    return out
+
+
+def read_accounts(path: str) -> "list[dict]":
+    """
+    Entry point used by every loader. Dispatches by file type:
+      • *.session → the Telethon session file itself (a ready login);
+      • *.json    → per-account JSON export(s);
+      • anything else (.csv/.txt/.tsv/…) → content-aware delimited parsing.
+    """
+    low = path.lower()
+    if low.endswith(".session"):
+        return _read_session_file(path)
+    if low.endswith(".json"):
+        return _read_json(path)
+    if low.endswith((".session-journal", ".session-wal", ".session-shm")):
+        return []                                    # sqlite sidecars, skip
+    return read_rows(path)

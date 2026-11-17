@@ -122,6 +122,7 @@ API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
 
 DEFAULT_ACCOUNTS_DIR = "accounts"
 SESSION_DIR = "sessions"          # where .session files may live (besides cwd)
+_SESSION_SEARCH_DIRS: "list[str]" = []   # dirs account files were loaded from
 CONNECT_TIMEOUT_SEC  = 30.0
 FLOOD_MAX_WAIT_SEC   = 300
 MAX_RETRIES          = 3
@@ -208,6 +209,8 @@ class Account:
     session: str
     user_id: str = ""
     email: str = ""
+    api_id: str = ""                 # per-account override (session's own api)
+    api_hash: str = ""
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     limiter: RateLimiter = field(default_factory=RateLimiter)
     client: Optional[TelegramClient] = field(default=None, repr=False)
@@ -260,16 +263,18 @@ def _sniff_delim(sample: str) -> str:
 
 
 def _load_file(path: str) -> "list[Account]":
-    # delegates to the shared reader: header CSV/TSV + headerless .txt dumps
-    from account_io import read_rows, derive_session
+    # shared reader: .session files, .json exports, header CSV/TSV, .txt dumps
+    from account_io import read_accounts, derive_session
     out: "list[Account]" = []
-    for r in read_rows(path):
+    for r in read_accounts(path):
         port_s = str(r.get("proxy_port", "") or "")
         out.append(Account(
             phone=r["phone"],
             session=r["session"] or derive_session(r["phone"]),
             user_id=r.get("user_id", ""),
             email=r.get("email", ""),
+            api_id=r.get("api_id", ""),
+            api_hash=r.get("api_hash", ""),
             proxy=ProxyConfig(
                 proxy_type=r.get("proxy_type", ""),
                 host=r.get("proxy_host", ""),
@@ -314,6 +319,9 @@ def load_accounts(folder: str = DEFAULT_ACCOUNTS_DIR, log_fn: LogFn = None) -> "
             f"no account file(s) at: {os.path.abspath(folder)!r}\n"
             f"Point this at a single file (accounts/main.csv) or a folder (accounts)."
         )
+    # remember where account files live so .session files can be found there
+    global _SESSION_SEARCH_DIRS
+    _SESSION_SEARCH_DIRS = sorted({os.path.dirname(p) for p in files})
     mode = "file" if (os.path.isfile(folder) or len(files) == 1) else "folder"
     _say(LEVEL_INFO, f"loading from {mode}: {len(files)} file(s)")
 
@@ -353,15 +361,23 @@ def _make_session(acc: Account):
         that — account dumps usually name the file by phone.
     """
     s = (acc.session or "").strip()
-    if len(s) >= 90 and re.fullmatch(r"[A-Za-z0-9+/=_\-]+", s):
+    # 1) an existing .session file (path or name) always wins
+    if os.path.exists(s + ".session"):
+        return s
+    # 2) a session STRING: long base64 (StringSession validates it itself, so a
+    #    path that slips through simply fails and falls back to a filename)
+    if len(s) >= 90 and "\\" not in s and re.fullmatch(r"[A-Za-z0-9+/=_\-]+", s):
         try:
             from telethon.sessions import StringSession
             return StringSession(s)
         except Exception:
             pass
     digits = re.sub(r"[^0-9]", "", acc.phone or "")
-    candidates = [s, acc.phone, digits, "+" + digits if digits else ""]
+    candidates = [s, os.path.basename(s), acc.phone, digits,
+                  "+" + digits if digits else ""]
     search_dirs = [os.getcwd(), SESSION_DIR, os.path.join(os.getcwd(), SESSION_DIR)]
+    search_dirs += _SESSION_SEARCH_DIRS
+    search_dirs += [os.path.join(d, "sessions") for d in _SESSION_SEARCH_DIRS]
     for d in search_dirs:
         for c in candidates:
             if not c:
@@ -375,8 +391,12 @@ def _make_session(acc: Account):
 async def connect_account(acc: Account, log_fn: LogFn) -> bool:
     who = acc.phone or acc.session
     try:
+        # a session is tied to the api_id/api_hash it was created with — use the
+        # account's own when provided, else the global default.
+        api_id = int(acc.api_id) if str(acc.api_id).strip().isdigit() else API_ID
+        api_hash = acc.api_hash.strip() or API_HASH
         acc.client = TelegramClient(
-            _make_session(acc), API_ID, API_HASH, proxy=acc.proxy.to_telethon()
+            _make_session(acc), api_id, api_hash, proxy=acc.proxy.to_telethon()
         )
         # connect() uses the existing session WITHOUT the interactive sign-in
         # that start() falls back to — a windowed .exe has no stdin, so start()

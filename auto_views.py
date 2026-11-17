@@ -250,9 +250,9 @@ def _sniff_delimiter(sample: str) -> str:
 
 def _load_from_file(path: str) -> "list[Account]":
     # shared reader: header CSV/TSV/pipe + headerless .txt dumps
-    from account_io import read_rows, derive_session
+    from account_io import read_accounts, derive_session
     accounts: "list[Account]" = []
-    for r in read_rows(path):
+    for r in read_accounts(path):
         port_s = str(r.get("proxy_port", "") or "")
         accounts.append(Account(
             phone=r["phone"],

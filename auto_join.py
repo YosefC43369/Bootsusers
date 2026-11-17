@@ -215,9 +215,9 @@ def _load_accounts_from_file(path: str) -> list[Account]:
     (comma/semicolon/tab/pipe) and HEADERLESS .txt dumps (one account per line:
     phone, phone:session, phone with proxy, etc.). Only `phone` is required.
     """
-    from account_io import read_rows, derive_session
+    from account_io import read_accounts, derive_session
     accounts = []
-    for r in read_rows(path):
+    for r in read_accounts(path):
         port_s = str(r.get("proxy_port", "") or "")
         accounts.append(Account(
             phone   = r["phone"],
