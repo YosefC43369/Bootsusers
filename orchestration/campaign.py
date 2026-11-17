@@ -317,4 +317,57 @@ def build_default_registry() -> OperationRegistry:
     except Exception:
         pass
 
+    # growth ops (phase 2) — scrape / invite / dm / dripjoin
+    try:
+        from growth import op_scrape, op_invite, op_dm, op_dripjoin, load_members
+
+        async def scrape(accounts, params, ctx):
+            return await op_scrape(accounts, params.get("source", ""),
+                                   params.get("out_file", "data/members.json"),
+                                   limit=int(params.get("limit", 0)),
+                                   aggressive=bool(params.get("aggressive", False)),
+                                   search=params.get("search", ""),
+                                   log_fn=ctx.log, should_stop=ctx.should_stop,
+                                   dry_run=bool(params.get("dry_run", False)))
+
+        def _gap(params, default):
+            g = params.get("gap")
+            return tuple(g) if isinstance(g, (list, tuple)) and len(g) == 2 else default
+
+        async def invite(accounts, params, ctx):
+            members = params.get("members") or load_members(
+                params.get("members_file", "data/members.json"))
+            return await op_invite(accounts, params.get("target", ""), members,
+                                   per_account=int(params.get("per_account", 20)),
+                                   batch=int(params.get("batch", 3)),
+                                   allow_id_fallback=bool(params.get("allow_id_fallback", False)),
+                                   log_fn=ctx.log, should_stop=ctx.should_stop,
+                                   store=ctx.store, dry_run=bool(params.get("dry_run", False)),
+                                   gap=_gap(params, (20.0, 50.0)))
+
+        async def dm(accounts, params, ctx):
+            members = params.get("members") or load_members(
+                params.get("members_file", "data/members.json"))
+            return await op_dm(accounts, members,
+                               params.get("templates", params.get("text", "")),
+                               per_account=int(params.get("per_account", 15)),
+                               simulate_typing=bool(params.get("simulate_typing", True)),
+                               log_fn=ctx.log, should_stop=ctx.should_stop,
+                               store=ctx.store, dry_run=bool(params.get("dry_run", False)),
+                               gap=_gap(params, (25.0, 60.0)))
+
+        async def dripjoin(accounts, params, ctx):
+            return await op_dripjoin(accounts, params.get("channel", ""),
+                                     wave_size=int(params.get("wave_size", 3)),
+                                     wave_gap=_gap(params, (30.0, 90.0)),
+                                     log_fn=ctx.log, should_stop=ctx.should_stop,
+                                     dry_run=bool(params.get("dry_run", False)))
+
+        reg.register("scrape", scrape)
+        reg.register("invite", invite)
+        reg.register("dm", dm)
+        reg.register("dripjoin", dripjoin)
+    except Exception:
+        pass
+
     return reg

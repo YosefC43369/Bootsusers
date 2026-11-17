@@ -1,0 +1,25 @@
+{
+  "name": "grow-and-engage",
+  "loop": false,
+  "steps": [
+    {
+      "op": "scrape",
+      "params": { "source": "@competitor_channel", "out_file": "data/members.json", "limit": 5000 }
+    },
+    {
+      "op": "invite",
+      "params": { "target": "@my_channel", "members_file": "data/members.json", "per_account": 20, "batch": 3 },
+      "cooldown_sec": 7200,
+      "pause_after_sec": 60
+    },
+    {
+      "op": "dm",
+      "params": {
+        "members_file": "data/members.json",
+        "templates": ["{Hi|Hey|Hello} {first_name}, {check out|take a look at} @my_channel"],
+        "per_account": 15
+      },
+      "cooldown_sec": 7200
+    }
+  ]
+}

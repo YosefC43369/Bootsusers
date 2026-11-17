@@ -233,6 +233,79 @@ async def cmd_reactive(args) -> int:
     return 0
 
 
+async def cmd_scrape(args) -> int:
+    from growth import op_scrape
+    rt = SuiteRuntime.build(args.db)
+    await prepare(rt, args.csv_dir, args.concurrency, health_check=False)
+    try:
+        res = await op_scrape(rt.live(), args.source, args.out,
+                              limit=args.limit, aggressive=args.aggressive,
+                              search=args.search, log_fn=_log, should_stop=lambda: False)
+    finally:
+        await disconnect_all(rt)
+    print(json.dumps(dict(res), ensure_ascii=False, indent=2))
+    rt.store.close()
+    return 0
+
+
+async def cmd_invite(args) -> int:
+    from growth import op_invite, load_members
+    rt = SuiteRuntime.build(args.db)
+    await prepare(rt, args.csv_dir, args.concurrency)
+    members = load_members(args.members)
+    try:
+        res = await op_invite(rt.live(), args.target, members,
+                              per_account=args.per_account, batch=args.batch,
+                              allow_id_fallback=args.allow_id_fallback,
+                              log_fn=_log, should_stop=lambda: False,
+                              store=rt.store, dry_run=args.dry_run)
+        for k, v in res.items():
+            rt.metrics.record("invite", k, count=int(v))
+    finally:
+        await disconnect_all(rt)
+    print(json.dumps(dict(res), ensure_ascii=False, indent=2))
+    rt.store.close()
+    return 0
+
+
+async def cmd_dm(args) -> int:
+    from growth import op_dm, load_members
+    rt = SuiteRuntime.build(args.db)
+    await prepare(rt, args.csv_dir, args.concurrency)
+    members = load_members(args.members)
+    templates = [open(args.template, encoding="utf-8").read()] if args.template else args.text
+    try:
+        res = await op_dm(rt.live(), members, templates,
+                          per_account=args.per_account,
+                          simulate_typing=not args.no_typing,
+                          log_fn=_log, should_stop=lambda: False,
+                          store=rt.store, dry_run=args.dry_run)
+        for k, v in res.items():
+            rt.metrics.record("dm", k, count=int(v))
+    finally:
+        await disconnect_all(rt)
+    print(json.dumps(dict(res), ensure_ascii=False, indent=2))
+    rt.store.close()
+    return 0
+
+
+async def cmd_dripjoin(args) -> int:
+    from growth import op_dripjoin
+    rt = SuiteRuntime.build(args.db)
+    await prepare(rt, args.csv_dir, args.concurrency)
+    try:
+        res = await op_dripjoin(rt.live(), args.channel, wave_size=args.wave_size,
+                                log_fn=_log, should_stop=lambda: False,
+                                dry_run=args.dry_run)
+        for k, v in res.items():
+            rt.metrics.record("dripjoin", k, count=int(v))
+    finally:
+        await disconnect_all(rt)
+    print(json.dumps(dict(res), ensure_ascii=False, indent=2))
+    rt.store.close()
+    return 0
+
+
 def cmd_metrics(args) -> int:
     store = StateStore(args.db)
     rep = report_from_store(store, args.window)
@@ -321,6 +394,34 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--stars", type=int, default=0)
     r.add_argument("--views", action="store_true")
 
+    sc = sub.add_parser("scrape", help="harvest a source group's members")
+    sc.add_argument("--source", required=True)
+    sc.add_argument("--out", default="data/members.json")
+    sc.add_argument("--limit", type=int, default=0)
+    sc.add_argument("--search", default="")
+    sc.add_argument("--aggressive", action="store_true")
+
+    iv = sub.add_parser("invite", help="invite scraped members into a target")
+    iv.add_argument("--target", required=True)
+    iv.add_argument("--members", default="data/members.json")
+    iv.add_argument("--per-account", type=int, default=20)
+    iv.add_argument("--batch", type=int, default=3)
+    iv.add_argument("--allow-id-fallback", action="store_true")
+    iv.add_argument("--dry-run", action="store_true")
+
+    dm = sub.add_parser("dm", help="mass DM scraped members (templated)")
+    dm.add_argument("--members", default="data/members.json")
+    dm.add_argument("--text", default="")
+    dm.add_argument("--template", default="", help="path to a message template file")
+    dm.add_argument("--per-account", type=int, default=15)
+    dm.add_argument("--no-typing", action="store_true")
+    dm.add_argument("--dry-run", action="store_true")
+
+    dj = sub.add_parser("dripjoin", help="join a channel in small waves")
+    dj.add_argument("--channel", required=True)
+    dj.add_argument("--wave-size", type=int, default=3)
+    dj.add_argument("--dry-run", action="store_true")
+
     m = sub.add_parser("metrics", help="print historical metrics from the DB")
     m.add_argument("--window", type=float, default=None, help="last N seconds")
 
@@ -346,6 +447,14 @@ def main() -> int:
             return asyncio.run(cmd_campaign(args))
         if args.cmd == "reactive":
             return asyncio.run(cmd_reactive(args))
+        if args.cmd == "scrape":
+            return asyncio.run(cmd_scrape(args))
+        if args.cmd == "invite":
+            return asyncio.run(cmd_invite(args))
+        if args.cmd == "dm":
+            return asyncio.run(cmd_dm(args))
+        if args.cmd == "dripjoin":
+            return asyncio.run(cmd_dripjoin(args))
         if args.cmd == "serve":
             return asyncio.run(cmd_serve(args))
         if args.cmd == "metrics":
