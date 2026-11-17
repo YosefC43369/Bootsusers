@@ -53,9 +53,37 @@ if errorlevel 1 (
 
 echo.
 echo  ============================================================
-echo   DONE.  Your executable is here:
-echo       dist\Bootsusers.exe
-echo  ============================================================
+if exist "%~dp0dist\Bootsusers.exe" (
+    echo   DONE.  Your executable is here:
+    echo.
+    echo       "%~dp0dist\Bootsusers.exe"
+    echo.
+    echo   Opening the dist folder now ...
+    echo  ============================================================
+    REM open the folder with the .exe selected
+    explorer /select,"%~dp0dist\Bootsusers.exe"
+) else (
+    echo   [!] BUILD SAID OK, BUT dist\Bootsusers.exe IS MISSING.
+    echo  ============================================================
+    echo.
+    echo   This is almost always your ANTIVIRUS / Windows Defender
+    echo   deleting the file right after build. PyInstaller one-file
+    echo   .exe files are very often falsely flagged.
+    echo.
+    echo   Fix:
+    echo     1^) Open  Windows Security ^> Virus ^& threat protection
+    echo        ^> Protection history  — if "Bootsusers.exe" was
+    echo        removed/quarantined, click it and choose RESTORE.
+    echo     2^) Add an exclusion for this folder:
+    echo          "%~dp0"
+    echo        ^(Virus ^& threat protection ^> Manage settings ^>
+    echo         Exclusions ^> Add ^> Folder^)
+    echo     3^) Run build_exe.bat again.
+    echo.
+    echo   The folder that SHOULD contain it:
+    echo       "%~dp0dist\"
+    if exist "%~dp0dist\" explorer "%~dp0dist\"
+)
 echo.
 pause
 endlocal
