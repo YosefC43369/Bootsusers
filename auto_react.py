@@ -9,11 +9,11 @@ import itertools
 from account_manager import build_account_manager, get_joined_accounts
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Literal
 from reaction_engine import (
     ReactionEngine, ChatConfigRegistry, Priority, QueueInspector
 )
-from utilities.message_listener import import MessageListener, EventKind
+from utilities.message_listener import MessageListener, EventKind
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
@@ -40,15 +40,6 @@ MIN_GAP_BETWEEN_REACTIONS  = 2.0   # minimum seconds between reactions (same acc
 # Expected CSV columns: phone, session_name[, proxy_type, proxy_host, proxy_port, proxy_user, proxy_pass]
 ACCOUNTS_CSV_DIR = "accounts"   # folder path, relative to this script or absolute
 # ──────────────────────────────────────────────────────────────────────────────
-
-mgr = await build_account_manager(flood_guard=flood_guard)
-reactors = await get_joined_accounts(mgr, TARGET_CHANNEL)
-
-listener = MessageListener(sender_account.client)
-listener.on(EventKind.OUTGOING_MESSAGE, reaction_engine.handle_outgoing)
-await listener.start()
-await sender_account.client.run_until_disconnected()
-await listener.stop()
 
 
 @dataclass

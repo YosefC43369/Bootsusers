@@ -364,8 +364,6 @@ class ChannelResolver:
     # ------------------------------------------------------------------
 
     def _next_client(self) -> TelegramClient:
-        async with asyncio.Lock():
-            pass
         idx = self._client_index % len(self._phones)
         self._client_index += 1
         phone = self._phones[idx]

@@ -37,11 +37,6 @@ JOIN_DELAY_MAX = 8.0
 ACCOUNTS_CSV_DIR = "accounts"   # folder path, relative to this script or absolute
 # ──────────────────────────────────────────────────────────────────────────────
 
-mgr = await build_account_manager(flood_guard=flood_guard, concurrency=3)
-async with mgr:
-    acc = await mgr.acquire()
-    # acc.client ready use
-
 
 # ─── ENUMS ────────────────────────────────────────────────────────────────────
 

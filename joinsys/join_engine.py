@@ -24,7 +24,6 @@ from telethon.errors import (
     ChatAdminRequiredError,
     PeerFloodError,
     UserBannedInChannelError,
-    TooManyRequestsError,
     ChatWriteForbiddenError,
     UserNotParticipantError,
     UsernameInvalidError,
@@ -332,9 +331,6 @@ async def _do_join(
         return JoinStatus.FLOOD_WAIT, None, "", e.seconds
     except PeerFloodError:
         return JoinStatus.FLOOD_WAIT, None, "", 600
-    except TooManyRequestsError as e:
-        wait = getattr(e, "seconds", 60)
-        return JoinStatus.FLOOD_WAIT, None, "", wait
     except (InviteHashExpiredError, InviteHashInvalidError):
         return JoinStatus.INVALID, None, "", 0
     except (UserBannedInChannelError, ChatAdminRequiredError):
