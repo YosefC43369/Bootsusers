@@ -523,7 +523,9 @@ async def connect_account(acc: Account) -> bool:
     try:
         proxy = acc.proxy.to_telethon()
         acc.client = TelegramClient(acc.session, API_ID, API_HASH, proxy=proxy)
-        await acc.client.start(phone=acc.phone)
+        await acc.client.connect()
+        if not await acc.client.is_user_authorized():
+            raise RuntimeError('session not authorized — needs a logged-in .session file or session string (cannot sign in headlessly)')
         acc.mark_ok()
         tag = f" via {acc.proxy.proxy_type}:{acc.proxy.host}" if acc.proxy.proxy_type else ""
         log.info(f"connected: {acc.phone}{tag}")

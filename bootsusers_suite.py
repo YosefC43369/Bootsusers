@@ -121,6 +121,7 @@ API_ID   = 34674448
 API_HASH = "7098ee8e75f3c435f808ee9410a2f05b"
 
 DEFAULT_ACCOUNTS_DIR = "accounts"
+SESSION_DIR = "sessions"          # where .session files may live (besides cwd)
 CONNECT_TIMEOUT_SEC  = 30.0
 FLOOD_MAX_WAIT_SEC   = 300
 MAX_RETRIES          = 3
@@ -343,24 +344,66 @@ def load_accounts(folder: str = DEFAULT_ACCOUNTS_DIR, log_fn: LogFn = None) -> "
 #  CORE — connection
 # ==============================================================================
 
+def _make_session(acc: Account):
+    """
+    Resolve what Telethon should open:
+      • a session STRING (long base64) → StringSession (logged-in, portable);
+      • otherwise a .session filename. If the given name has no file but one
+        named after the phone exists (next to the exe or in SESSION_DIR), use
+        that — account dumps usually name the file by phone.
+    """
+    s = (acc.session or "").strip()
+    if len(s) >= 90 and re.fullmatch(r"[A-Za-z0-9+/=_\-]+", s):
+        try:
+            from telethon.sessions import StringSession
+            return StringSession(s)
+        except Exception:
+            pass
+    digits = re.sub(r"[^0-9]", "", acc.phone or "")
+    candidates = [s, acc.phone, digits, "+" + digits if digits else ""]
+    search_dirs = [os.getcwd(), SESSION_DIR, os.path.join(os.getcwd(), SESSION_DIR)]
+    for d in search_dirs:
+        for c in candidates:
+            if not c:
+                continue
+            path = c if os.path.isabs(c) else os.path.join(d, c)
+            if os.path.exists(path + ".session"):
+                return path
+    return s
+
+
 async def connect_account(acc: Account, log_fn: LogFn) -> bool:
+    who = acc.phone or acc.session
     try:
         acc.client = TelegramClient(
-            acc.session, API_ID, API_HASH, proxy=acc.proxy.to_telethon()
+            _make_session(acc), API_ID, API_HASH, proxy=acc.proxy.to_telethon()
         )
-        await asyncio.wait_for(acc.client.start(phone=acc.phone),
-                               timeout=CONNECT_TIMEOUT_SEC)
+        # connect() uses the existing session WITHOUT the interactive sign-in
+        # that start() falls back to — a windowed .exe has no stdin, so start()
+        # would raise "lost sys.stdin" for every un-authorized session.
+        await asyncio.wait_for(acc.client.connect(), timeout=CONNECT_TIMEOUT_SEC)
+        if not await acc.client.is_user_authorized():
+            acc._failures = acc.MAX_FAIL
+            try:
+                await acc.client.disconnect()
+            except Exception:
+                pass
+            acc.client = None
+            log_fn(LEVEL_ERR, f"{who}: session not authorized — needs a logged-in "
+                              f".session file or a session string (cannot sign in "
+                              f"headlessly)")
+            return False
         acc.mark_ok()
         tag = f" via {acc.proxy.proxy_type}:{acc.proxy.host}" if acc.proxy.proxy_type else ""
-        log_fn(LEVEL_OK, f"connected {acc.phone}{tag}")
+        log_fn(LEVEL_OK, f"connected {who}{tag}")
         return True
     except (AuthKeyUnregisteredError, UserDeactivatedBanError) as exc:
         acc._failures = acc.MAX_FAIL
-        log_fn(LEVEL_ERR, f"{acc.phone} dead/banned: {exc}")
+        log_fn(LEVEL_ERR, f"{who} dead/banned: {exc}")
         return False
     except Exception as exc:
         acc.mark_fail()
-        log_fn(LEVEL_ERR, f"connect failed {acc.phone}: {exc}")
+        log_fn(LEVEL_ERR, f"connect failed {who}: {exc}")
         return False
 
 

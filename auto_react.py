@@ -308,7 +308,9 @@ async def connect_account(acc: Account) -> bool:
             API_HASH,
             proxy=proxy_tuple,
         )
-        await acc.client.start(phone=acc.phone)
+        await acc.client.connect()
+        if not await acc.client.is_user_authorized():
+            raise RuntimeError('session not authorized — needs a logged-in .session file or session string (cannot sign in headlessly)')
         acc.mark_ok()
         proxy_tag = f" via {acc.proxy.proxy_type}:{acc.proxy.host}" if acc.proxy.proxy_type else ""
         print(f"[+] connected: {acc.phone}{proxy_tag}")
