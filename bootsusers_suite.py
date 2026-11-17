@@ -709,6 +709,16 @@ BANNER = r"""
 """
 
 
+def resource_path(*parts: str) -> Path:
+    """
+    Resolve a bundled resource both when running from source and when frozen
+    by PyInstaller (onefile extracts data into sys._MEIPASS).
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    root = Path(base) if base else Path(__file__).resolve().parent
+    return root.joinpath(*parts)
+
+
 def register_hack_font() -> str:
     """
     Try to make the 'Hack' font available and return the family name to use.
@@ -716,7 +726,7 @@ def register_hack_font() -> str:
     font) so the GUI looks right even when Hack is not system-installed.
     Falls back to a monospace family that always exists.
     """
-    bundled = Path(__file__).parent / "assets" / "Hack-Regular.ttf"
+    bundled = resource_path("assets", "Hack-Regular.ttf")
     if bundled.exists() and sys.platform.startswith("win"):
         try:
             import ctypes
