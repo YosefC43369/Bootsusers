@@ -198,43 +198,29 @@ def _derive_session(phone: str) -> str:
 
 def _load_accounts_from_file(path: str) -> list[Account]:
     """
-    Read one delimited text file (comma/semicolon/tab/pipe) and return Accounts.
-    Column names are matched tolerantly; a missing session name is derived from
-    the phone. Only `phone` is required. Non-tabular files yield no rows.
+    Read one account file via the shared reader: delimited files WITH a header
+    (comma/semicolon/tab/pipe) and HEADERLESS .txt dumps (one account per line:
+    phone, phone:session, phone with proxy, etc.). Only `phone` is required.
     """
+    from account_io import read_rows, derive_session
     accounts = []
-    with open(path, newline="", encoding="utf-8-sig", errors="ignore") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        try:
-            delim = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
-        except Exception:
-            delim = ","
-        reader = csv.DictReader(f, delimiter=delim)
-        if not reader.fieldnames:
-            return accounts
-        for raw in reader:
-            row = {(k or "").strip().lower(): v for k, v in raw.items()}
-            phone = _col(row, _COL_ALIASES["phone"])
-            if not phone:
-                continue
-            port_s = _col(row, _COL_ALIASES["p_port"])
-            proxy = ProxyConfig(
-                proxy_type = _col(row, _COL_ALIASES["p_type"]),
-                host       = _col(row, _COL_ALIASES["p_host"]),
+    for r in read_rows(path):
+        port_s = str(r.get("proxy_port", "") or "")
+        accounts.append(Account(
+            phone   = r["phone"],
+            session = r["session"] or derive_session(r["phone"]),
+            proxy   = ProxyConfig(
+                proxy_type = r.get("proxy_type", ""),
+                host       = r.get("proxy_host", ""),
                 port       = int(port_s) if port_s.isdigit() else 0,
-                username   = _col(row, _COL_ALIASES["p_user"]),
-                password   = _col(row, _COL_ALIASES["p_pass"]),
-            )
-            accounts.append(Account(
-                phone   = phone,
-                session = _col(row, _COL_ALIASES["session"]) or _derive_session(phone),
-                proxy   = proxy,
-                limiter = RateLimiter(
-                    max_per_hour = MAX_REACTIONS_PER_HOUR,
-                    min_gap_sec  = MIN_GAP_BETWEEN_REACTIONS,
-                ),
-            ))
+                username   = r.get("proxy_user", ""),
+                password   = r.get("proxy_pass", ""),
+            ),
+            limiter = RateLimiter(
+                max_per_hour = MAX_REACTIONS_PER_HOUR,
+                min_gap_sec  = MIN_GAP_BETWEEN_REACTIONS,
+            ),
+        ))
     return accounts
 
 

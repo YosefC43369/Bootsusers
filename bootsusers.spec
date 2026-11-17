@@ -31,7 +31,7 @@ datas += collect_data_files("customtkinter")       # ctk themes/assets
 # --- hidden / dynamically-imported modules ------------------------------------
 hiddenimports = []
 hiddenimports += collect_submodules("telethon")     # tl.* request/type classes
-hiddenimports += ["socks", "customtkinter", "tg_resolve"]
+hiddenimports += ["socks", "customtkinter", "tg_resolve", "account_io"]
 # the suite's advanced ops are imported in a guarded try/except, which the
 # analyzer may not follow — pull the whole feature set in explicitly so the
 # all-in-one GUI has every operation inside the one .exe.

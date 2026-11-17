@@ -259,32 +259,24 @@ def _sniff_delim(sample: str) -> str:
 
 
 def _load_file(path: str) -> "list[Account]":
+    # delegates to the shared reader: header CSV/TSV + headerless .txt dumps
+    from account_io import read_rows, derive_session
     out: "list[Account]" = []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        reader = csv.DictReader(f, delimiter=_sniff_delim(sample))
-        if not reader.fieldnames:
-            return out
-        for raw in reader:
-            row = {(k or "").strip().lower(): v for k, v in raw.items()}
-            phone = _pick(row, _COLS["phone"])
-            if not phone:
-                continue
-            port_s = _pick(row, _COLS["p_port"])
-            out.append(Account(
-                phone=phone,
-                session=_pick(row, _COLS["session"]) or _sanitize_session(phone),
-                user_id=_pick(row, _COLS["user_id"]),
-                email=_pick(row, _COLS["email"]),
-                proxy=ProxyConfig(
-                    proxy_type=_pick(row, _COLS["p_type"]),
-                    host=_pick(row, _COLS["p_host"]),
-                    port=int(port_s) if port_s.isdigit() else 0,
-                    username=_pick(row, _COLS["p_user"]),
-                    password=_pick(row, _COLS["p_pass"]),
-                ),
-            ))
+    for r in read_rows(path):
+        port_s = str(r.get("proxy_port", "") or "")
+        out.append(Account(
+            phone=r["phone"],
+            session=r["session"] or derive_session(r["phone"]),
+            user_id=r.get("user_id", ""),
+            email=r.get("email", ""),
+            proxy=ProxyConfig(
+                proxy_type=r.get("proxy_type", ""),
+                host=r.get("proxy_host", ""),
+                port=int(port_s) if port_s.isdigit() else 0,
+                username=r.get("proxy_user", ""),
+                password=r.get("proxy_pass", ""),
+            ),
+        ))
     return out
 
 

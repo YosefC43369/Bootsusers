@@ -249,37 +249,25 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def _load_from_file(path: str) -> "list[Account]":
+    # shared reader: header CSV/TSV/pipe + headerless .txt dumps
+    from account_io import read_rows, derive_session
     accounts: "list[Account]" = []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        delim = _sniff_delimiter(sample)
-        reader = csv.DictReader(f, delimiter=delim)
-        if not reader.fieldnames:
-            return accounts
-        for raw in reader:
-            # normalise keys to lowercase/stripped for tolerant matching
-            row = {(k or "").strip().lower(): v for k, v in raw.items()}
-            phone = _pick(row, _COLS["phone"])
-            if not phone:
-                continue
-            session = _pick(row, _COLS["session"]) or _sanitize_session(phone)
-            port_s = _pick(row, _COLS["p_port"])
-            proxy = ProxyConfig(
-                proxy_type=_pick(row, _COLS["p_type"]),
-                host=_pick(row, _COLS["p_host"]),
+    for r in read_rows(path):
+        port_s = str(r.get("proxy_port", "") or "")
+        accounts.append(Account(
+            phone=r["phone"],
+            session=r["session"] or derive_session(r["phone"]),
+            user_id=r.get("user_id", ""),
+            email=r.get("email", ""),
+            proxy=ProxyConfig(
+                proxy_type=r.get("proxy_type", ""),
+                host=r.get("proxy_host", ""),
                 port=int(port_s) if port_s.isdigit() else 0,
-                username=_pick(row, _COLS["p_user"]),
-                password=_pick(row, _COLS["p_pass"]),
-            )
-            accounts.append(Account(
-                phone=phone,
-                session=session,
-                user_id=_pick(row, _COLS["user_id"]),
-                email=_pick(row, _COLS["email"]),
-                proxy=proxy,
-                limiter=RateLimiter(MAX_VIEW_OPS_PER_HOUR, MIN_GAP_BETWEEN_OPS_SEC),
-            ))
+                username=r.get("proxy_user", ""),
+                password=r.get("proxy_pass", ""),
+            ),
+            limiter=RateLimiter(MAX_VIEW_OPS_PER_HOUR, MIN_GAP_BETWEEN_OPS_SEC),
+        ))
     return accounts
 
 
