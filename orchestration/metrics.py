@@ -56,19 +56,20 @@ class MetricsRegistry:
         self._started = time.time()
 
     # -- recording ----------------------------------------------------------
-    def record(self, op: str, status: str, phone: str = "", stars: int = 0) -> None:
+    def record(self, op: str, status: str, phone: str = "", stars: int = 0,
+               count: int = 1) -> None:
         now = time.time()
         with self._lock:
-            self._totals[status] += 1
-            self._totals[f"op:{op}"] += 1
+            self._totals[status] += count
+            self._totals[f"op:{op}"] += count
             if stars:
                 self._totals["stars"] += stars
-            self._by_op[op][status] += 1
+            self._by_op[op][status] += count
             if phone:
-                self._by_phone[phone][status] += 1
-                self._by_phone[phone]["_total"] += 1
-            self._current_bucket(now).add(status)
-            self._current_bucket(now).add(f"{op}:{status}")
+                self._by_phone[phone][status] += count
+                self._by_phone[phone]["_total"] += count
+            self._current_bucket(now).add(status, count)
+            self._current_bucket(now).add(f"{op}:{status}", count)
 
     def _current_bucket(self, now: float) -> Bucket:
         slot = now - (now % self.bucket_sec)

@@ -1,0 +1,33 @@
+{
+  "name": "nightly-boost",
+  "loop": false,
+  "steps": [
+    {
+      "op": "views",
+      "params": { "channel": "@your_channel", "message": "latest:3" },
+      "count": 0,
+      "cooldown_sec": 3600,
+      "pause_after_sec": 20
+    },
+    {
+      "op": "react",
+      "params": { "channel": "@your_channel", "message": "latest", "emoji": "🔥" },
+      "count": 40,
+      "cooldown_sec": 3600,
+      "pause_after_sec": 15
+    },
+    {
+      "op": "stars",
+      "params": { "channel": "@your_channel", "message": "latest", "stars": 1, "clamp": true },
+      "count": 0,
+      "cooldown_sec": 7200,
+      "pause_after_sec": 10
+    },
+    {
+      "op": "story",
+      "params": { "channel": "@your_channel", "emoji": "⭐" },
+      "count": 0,
+      "cooldown_sec": 3600
+    }
+  ]
+}

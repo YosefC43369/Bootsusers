@@ -193,6 +193,13 @@ class CampaignRunner:
                     result = await op(pool, step.params, self.ctx)
                     for k, v in (result or Counter()).items():
                         agg[f"{step.op}:{k}"] += v
+                        # feed live metrics + a per-run summary row from the result
+                        if self.ctx.metrics:
+                            self.ctx.metrics.record(step.op, k, count=int(v))
+                        if self.ctx.store:
+                            self.ctx.store.log_action(
+                                "", step.op, str(step.params.get("channel", "")),
+                                k, f"count={v}")
                     # apply cooldowns to the accounts we just used
                     if store and step.cooldown_sec > 0:
                         for acc in pool:
