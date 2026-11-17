@@ -273,22 +273,41 @@ def _load_file(path: str) -> "list[Account]":
     return out
 
 
+def _collect_account_files(path: str) -> "list[str]":
+    """
+    Resolve `path` into a list of account files. Two ways to pick inputs:
+      • a single FILE      → read only that file   (e.g. accounts/main.csv)
+      • a FOLDER           → read every file in it  (e.g. accounts)
+    A glob pattern also works (e.g. accounts/batch*.csv) for a middle ground.
+    """
+    path = os.path.expanduser(path)
+    if os.path.isfile(path):
+        return [os.path.abspath(path)]
+    if any(ch in path for ch in "*?["):
+        return sorted(os.path.abspath(f) for f in glob.glob(path) if os.path.isfile(f))
+    if os.path.isdir(path):
+        folder = os.path.abspath(path)
+        return sorted(os.path.abspath(p) for p in glob.glob(os.path.join(folder, "*"))
+                      if os.path.isfile(p))
+    return []
+
+
 def load_accounts(folder: str = DEFAULT_ACCOUNTS_DIR, log_fn: LogFn = None) -> "list[Account]":
-    """Merge every *.csv in *folder*, de-duplicated by phone."""
+    """
+    Load accounts from `folder`, which may be a single file, a folder (all
+    files in it), or a glob pattern. De-duplicated by phone.
+    """
     def _say(level, msg):
         if log_fn:
             log_fn(level, msg)
-    folder_path = os.path.abspath(folder)
-    if not os.path.isdir(folder_path):
-        raise FileNotFoundError(
-            f"account folder not found: {folder_path!r}\n"
-            f"Create it and drop your .csv files (id/email/phone) inside."
-        )
-    # read EVERY file in the folder (any extension), not just *.csv
-    files = sorted(p for p in glob.glob(os.path.join(folder_path, "*"))
-                   if os.path.isfile(p))
+    files = _collect_account_files(folder)
     if not files:
-        raise FileNotFoundError(f"no files in: {folder_path!r}")
+        raise FileNotFoundError(
+            f"no account file(s) at: {os.path.abspath(folder)!r}\n"
+            f"Point this at a single file (accounts/main.csv) or a folder (accounts)."
+        )
+    mode = "file" if (os.path.isfile(folder) or len(files) == 1) else "folder"
+    _say(LEVEL_INFO, f"loading from {mode}: {len(files)} file(s)")
 
     merged: "list[Account]" = []
     seen: "set[str]" = set()
@@ -863,7 +882,7 @@ def run_gui() -> int:
     acc_bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
     acc_bar.grid_columnconfigure(1, weight=1)
 
-    ctk.CTkLabel(acc_bar, text="ACCOUNTS DIR", font=font(11, "bold"),
+    ctk.CTkLabel(acc_bar, text="ACCOUNTS (file or folder)", font=font(11, "bold"),
                  text_color=THEME["accent"]).grid(row=0, column=0, padx=(14, 8), pady=12)
     dir_entry = ctk.CTkEntry(acc_bar, font=font(12), fg_color=THEME["log_bg"],
                              border_color=THEME["border"], text_color=THEME["text"])

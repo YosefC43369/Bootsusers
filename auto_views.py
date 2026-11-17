@@ -269,21 +269,25 @@ def _load_from_file(path: str) -> "list[Account]":
 
 
 def load_accounts(folder: str = ACCOUNTS_DIR) -> "list[Account]":
-    """Merge every *.csv in *folder* (comma/semicolon/tab/pipe delimited)."""
-    folder_path = os.path.abspath(folder)
-    if not os.path.isdir(folder_path):
-        raise FileNotFoundError(
-            f"[load_accounts] account folder not found: {folder_path!r}\n"
-            f"Create the folder and place your .csv files (with id/email/phone) inside it."
-        )
-
-    # read EVERY file in the folder (any extension), not just *.csv
-    files = sorted(p for p in glob.glob(os.path.join(folder_path, "*"))
-                   if os.path.isfile(p))
+    """
+    Load accounts from `folder`, which may be a single FILE, a FOLDER (all
+    files in it), or a glob pattern. Delimiter + columns are auto-detected.
+    """
+    folder = os.path.expanduser(folder)
+    if os.path.isfile(folder):
+        files = [os.path.abspath(folder)]
+    elif any(ch in folder for ch in "*?["):
+        files = sorted(os.path.abspath(f) for f in glob.glob(folder) if os.path.isfile(f))
+    elif os.path.isdir(folder):
+        files = sorted(os.path.abspath(p)
+                       for p in glob.glob(os.path.join(os.path.abspath(folder), "*"))
+                       if os.path.isfile(p))
+    else:
+        files = []
     if not files:
         raise FileNotFoundError(
-            f"[load_accounts] no files found in: {folder_path!r}\n"
-            f"Drop at least one account file into that folder."
+            f"[load_accounts] no account file(s) at: {os.path.abspath(folder)!r}\n"
+            f"Point this at a single file (accounts/main.csv) or a folder (accounts)."
         )
 
     merged: "list[Account]" = []

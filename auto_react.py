@@ -238,23 +238,22 @@ def load_accounts(folder: str = ACCOUNTS_CSV_DIR) -> list[Account]:
     """
     import os, glob
 
-    folder_path = os.path.abspath(folder)
-    if not os.path.isdir(folder_path):
-        raise FileNotFoundError(
-            f"[load_accounts] CSV folder not found: {folder_path!r}\n"
-            f"Create the folder and place your .csv account files inside it."
-        )
-
-    # read EVERY file in the folder (any extension), not just *.csv;
-    # sub-directories are skipped, unparseable files are ignored below.
-    csv_files = sorted(
-        p for p in glob.glob(os.path.join(folder_path, "*"))
-        if os.path.isfile(p)
-    )
+    # `folder` may be a single FILE, a FOLDER (all files), or a glob pattern.
+    folder = os.path.expanduser(folder)
+    if os.path.isfile(folder):
+        csv_files = [os.path.abspath(folder)]
+    elif any(ch in folder for ch in "*?["):
+        csv_files = sorted(os.path.abspath(f) for f in glob.glob(folder) if os.path.isfile(f))
+    elif os.path.isdir(folder):
+        csv_files = sorted(os.path.abspath(p)
+                           for p in glob.glob(os.path.join(os.path.abspath(folder), "*"))
+                           if os.path.isfile(p))
+    else:
+        csv_files = []
     if not csv_files:
         raise FileNotFoundError(
-            f"[load_accounts] No files found in: {folder_path!r}\n"
-            f"Drop at least one account CSV file into that folder."
+            f"[load_accounts] No account file(s) at: {os.path.abspath(folder)!r}\n"
+            f"Point this at a single file (accounts/main.csv) or a folder (accounts)."
         )
 
     all_accounts: list[Account] = []
@@ -287,7 +286,7 @@ def load_accounts(folder: str = ACCOUNTS_CSV_DIR) -> list[Account]:
 
     logging.info(
         "[load_accounts] Done. %d total accounts loaded from %d file(s) in %r",
-        len(all_accounts), len(csv_files), folder_path,
+        len(all_accounts), len(csv_files), os.path.abspath(folder),
     )
     return all_accounts
 
