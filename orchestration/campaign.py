@@ -271,4 +271,43 @@ def build_default_registry() -> OperationRegistry:
     except Exception:
         pass  # suite not importable in this context; registry stays empty
 
+    # engagement ops (section 1) — vote / forward / comment / story
+    try:
+        from engagement.ops import op_vote, op_forward, op_comment, op_story
+
+        async def vote(accounts, params, ctx):
+            return await op_vote(accounts, params.get("channel", ""),
+                                 params.get("message", ""),
+                                 option_index=int(params.get("option_index", 0)),
+                                 option_text=params.get("option_text", ""),
+                                 log_fn=ctx.log, should_stop=ctx.should_stop,
+                                 dry_run=bool(params.get("dry_run", False)))
+
+        async def forward(accounts, params, ctx):
+            return await op_forward(accounts, params.get("channel", ""),
+                                    params.get("message", ""),
+                                    to=params.get("to", "me"),
+                                    log_fn=ctx.log, should_stop=ctx.should_stop,
+                                    dry_run=bool(params.get("dry_run", False)))
+
+        async def comment(accounts, params, ctx):
+            return await op_comment(accounts, params.get("channel", ""),
+                                    params.get("message", ""),
+                                    params.get("texts", params.get("text", "")),
+                                    log_fn=ctx.log, should_stop=ctx.should_stop,
+                                    dry_run=bool(params.get("dry_run", False)))
+
+        async def story(accounts, params, ctx):
+            return await op_story(accounts, params.get("channel", ""),
+                                  react_emoji=params.get("emoji", ""),
+                                  log_fn=ctx.log, should_stop=ctx.should_stop,
+                                  dry_run=bool(params.get("dry_run", False)))
+
+        reg.register("vote", vote)
+        reg.register("forward", forward)
+        reg.register("comment", comment)
+        reg.register("story", story)
+    except Exception:
+        pass
+
     return reg
